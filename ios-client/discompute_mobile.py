@@ -28,7 +28,7 @@ except ImportError:
     import random
     HAS_NUMPY = False
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Tuple
 
 @dataclass
 class ComputeTask:
@@ -56,6 +56,32 @@ class SubTask:
     completed_at: Optional[float] = None
     result_data: Optional[Dict[str, Any]] = None
     error_message: Optional[str] = None
+
+@dataclass
+class DistributedTrainingJob:
+    """Represents a distributed neural network training job"""
+    job_id: str
+    model_config: Dict[str, Any]  # Network architecture
+    training_config: Dict[str, Any]  # Training hyperparameters
+    master_device_id: str
+    slave_devices: List[str]
+    current_epoch: int = 0
+    total_epochs: int = 10
+    model_parameters: Optional[Dict[str, Any]] = None
+    training_data: Optional[List[Any]] = None
+    status: str = "initialized"  # initialized, training, completed, failed
+
+@dataclass
+class TrainingBatch:
+    """Represents a training batch sent to a slave device"""
+    batch_id: str
+    job_id: str
+    epoch: int
+    batch_index: int
+    data: List[Any]  # Training samples
+    labels: List[Any]  # Training labels
+    model_weights: Dict[str, Any]  # Current model parameters
+    learning_rate: float = 0.01
 
 class TaskExecutor:
     """Executes compute tasks on the local device"""
@@ -296,6 +322,332 @@ class TaskExecutor:
             "result": float(result)
         }
 
+class DistributedTrainingManager:
+    """Manages distributed neural network training across multiple devices"""
+    
+    def __init__(self, device_id: str, is_master: bool = False):
+        self.device_id = device_id
+        self.is_master = is_master
+        self.training_jobs: Dict[str, DistributedTrainingJob] = {}
+        self.pending_batches: Dict[str, TrainingBatch] = {}
+        self.completed_gradients: Dict[str, List[Dict[str, Any]]] = {}
+        
+    def create_neural_network(self, input_size: int, hidden_sizes: List[int], output_size: int) -> Dict[str, Any]:
+        """Create a simple neural network architecture"""
+        layers = []
+        prev_size = input_size
+        
+        # Hidden layers
+        for i, hidden_size in enumerate(hidden_sizes):
+            layers.append({
+                "name": f"hidden_{i}",
+                "type": "dense",
+                "input_size": prev_size,
+                "output_size": hidden_size,
+                "activation": "relu"
+            })
+            prev_size = hidden_size
+            
+        # Output layer
+        layers.append({
+            "name": "output",
+            "type": "dense", 
+            "input_size": prev_size,
+            "output_size": output_size,
+            "activation": "softmax"
+        })
+        
+        return {
+            "layers": layers,
+            "input_size": input_size,
+            "output_size": output_size,
+            "total_parameters": self._count_parameters(layers)
+        }
+    
+    def _count_parameters(self, layers: List[Dict[str, Any]]) -> int:
+        """Count total parameters in the network"""
+        total = 0
+        for layer in layers:
+            if layer["type"] == "dense":
+                # weights + biases
+                total += layer["input_size"] * layer["output_size"] + layer["output_size"]
+        return total
+    
+    def initialize_weights(self, model_config: Dict[str, Any]) -> Dict[str, Any]:
+        """Initialize neural network weights"""
+        weights = {}
+        
+        for layer in model_config["layers"]:
+            layer_name = layer["name"]
+            input_size = layer["input_size"]
+            output_size = layer["output_size"]
+            
+            if HAS_NUMPY:
+                # Xavier initialization
+                limit = (6.0 / (input_size + output_size)) ** 0.5
+                weights[f"{layer_name}_weights"] = np.random.uniform(
+                    -limit, limit, (input_size, output_size)
+                ).astype(np.float32).tolist()
+                weights[f"{layer_name}_bias"] = np.zeros(output_size).astype(np.float32).tolist()
+            else:
+                # Simple random initialization
+                limit = 0.1
+                weights[f"{layer_name}_weights"] = [
+                    [random.uniform(-limit, limit) for _ in range(output_size)]
+                    for _ in range(input_size)
+                ]
+                weights[f"{layer_name}_bias"] = [0.0] * output_size
+                
+        return weights
+    
+    def create_training_data(self, num_samples: int, input_size: int, num_classes: int) -> Tuple[List[List[float]], List[int]]:
+        """Create synthetic training data"""
+        data = []
+        labels = []
+        
+        for _ in range(num_samples):
+            if HAS_NUMPY:
+                sample = np.random.randn(input_size).astype(np.float32).tolist()
+            else:
+                sample = [random.gauss(0, 1) for _ in range(input_size)]
+            
+            # Create synthetic label based on sample features
+            label = abs(hash(str(sample[:3]))) % num_classes
+            
+            data.append(sample)
+            labels.append(label)
+            
+        return data, labels
+    
+    def start_distributed_training(self, slave_devices: List[str], model_config: Dict[str, Any], 
+                                 training_config: Dict[str, Any]) -> str:
+        """Start a new distributed training job (Master only)"""
+        if not self.is_master:
+            raise ValueError("Only master device can start distributed training")
+            
+        job_id = str(uuid.uuid4())
+        
+        # Create training data
+        data, labels = self.create_training_data(
+            training_config.get("num_samples", 1000),
+            model_config["input_size"],
+            model_config["output_size"]
+        )
+        
+        job = DistributedTrainingJob(
+            job_id=job_id,
+            model_config=model_config,
+            training_config=training_config,
+            master_device_id=self.device_id,
+            slave_devices=slave_devices,
+            total_epochs=training_config.get("epochs", 10),
+            model_parameters=self.initialize_weights(model_config),
+            training_data=list(zip(data, labels))
+        )
+        
+        self.training_jobs[job_id] = job
+        print(f"🎯 Started distributed training job {job_id[:8]}...")
+        print(f"   Model: {len(model_config['layers'])} layers, {model_config['total_parameters']} parameters")
+        print(f"   Data: {len(data)} samples")
+        print(f"   Workers: {len(slave_devices)} devices")
+        
+        return job_id
+    
+    def distribute_epoch_batches(self, job_id: str) -> List[TrainingBatch]:
+        """Distribute training batches for current epoch to slave devices"""
+        if job_id not in self.training_jobs:
+            return []
+            
+        job = self.training_jobs[job_id]
+        batch_size = job.training_config.get("batch_size", 32)
+        num_slaves = len(job.slave_devices)
+        
+        if num_slaves == 0:
+            return []
+        
+        # Split data into batches
+        batches = []
+        data = job.training_data
+        total_samples = len(data)
+        
+        # Calculate samples per device
+        samples_per_device = total_samples // num_slaves
+        
+        for i, device_id in enumerate(job.slave_devices):
+            start_idx = i * samples_per_device
+            end_idx = start_idx + samples_per_device if i < num_slaves - 1 else total_samples
+            
+            device_data = data[start_idx:end_idx]
+            
+            # Split device data into batches
+            for batch_idx in range(0, len(device_data), batch_size):
+                batch_data = device_data[batch_idx:batch_idx + batch_size]
+                
+                if len(batch_data) > 0:
+                    batch_inputs = [sample[0] for sample in batch_data]
+                    batch_labels = [sample[1] for sample in batch_data]
+                    
+                    batch = TrainingBatch(
+                        batch_id=str(uuid.uuid4()),
+                        job_id=job_id,
+                        epoch=job.current_epoch,
+                        batch_index=len(batches),
+                        data=batch_inputs,
+                        labels=batch_labels,
+                        model_weights=job.model_parameters,
+                        learning_rate=job.training_config.get("learning_rate", 0.01)
+                    )
+                    
+                    batches.append(batch)
+                    
+        return batches
+    
+    def process_training_batch(self, batch: TrainingBatch) -> Dict[str, Any]:
+        """Process a training batch and compute gradients (Slave device)"""
+        print(f"🔄 Processing batch {batch.batch_id[:8]} with {len(batch.data)} samples")
+        
+        start_time = time.time()
+        
+        # Simulate forward and backward pass
+        gradients = {}
+        total_loss = 0.0
+        
+        # Simple gradient simulation
+        for layer_name, weights in batch.model_weights.items():
+            if "_weights" in layer_name:
+                if HAS_NUMPY:
+                    # Simulate gradient computation
+                    grad = np.random.randn(*np.array(weights).shape) * 0.001
+                    gradients[layer_name] = grad.tolist()
+                else:
+                    # Fallback gradient simulation
+                    if isinstance(weights[0], list):  # 2D weights
+                        gradients[layer_name] = [
+                            [random.gauss(0, 0.001) for _ in row] for row in weights
+                        ]
+                    else:  # 1D bias
+                        gradients[layer_name] = [random.gauss(0, 0.001) for _ in weights]
+            elif "_bias" in layer_name:
+                if HAS_NUMPY:
+                    grad = np.random.randn(len(weights)) * 0.001
+                    gradients[layer_name] = grad.tolist()
+                else:
+                    gradients[layer_name] = [random.gauss(0, 0.001) for _ in weights]
+        
+        # Simulate loss computation
+        total_loss = random.uniform(0.5, 2.0)
+        
+        end_time = time.time()
+        
+        return {
+            "batch_id": batch.batch_id,
+            "job_id": batch.job_id,
+            "epoch": batch.epoch,
+            "gradients": gradients,
+            "loss": total_loss,
+            "num_samples": len(batch.data),
+            "computation_time": end_time - start_time,
+            "device_id": self.device_id
+        }
+    
+    def aggregate_gradients(self, job_id: str, gradient_results: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Aggregate gradients from all slaves (Master only)"""
+        if not gradient_results:
+            return {}
+            
+        # Average gradients across all devices
+        aggregated = {}
+        num_devices = len(gradient_results)
+        
+        # Get parameter names from first result
+        first_result = gradient_results[0]
+        param_names = first_result["gradients"].keys()
+        
+        for param_name in param_names:
+            if HAS_NUMPY:
+                # Stack gradients and compute average
+                grads = [np.array(result["gradients"][param_name]) for result in gradient_results]
+                avg_grad = np.mean(grads, axis=0)
+                aggregated[param_name] = avg_grad.tolist()
+            else:
+                # Manual averaging for fallback
+                grads = [result["gradients"][param_name] for result in gradient_results]
+                if isinstance(grads[0][0], list):  # 2D weights
+                    rows, cols = len(grads[0]), len(grads[0][0])
+                    avg_grad = []
+                    for r in range(rows):
+                        row = []
+                        for c in range(cols):
+                            avg_val = sum(grad[r][c] for grad in grads) / num_devices
+                            row.append(avg_val)
+                        avg_grad.append(row)
+                    aggregated[param_name] = avg_grad
+                else:  # 1D bias
+                    size = len(grads[0])
+                    avg_grad = []
+                    for i in range(size):
+                        avg_val = sum(grad[i] for grad in grads) / num_devices
+                        avg_grad.append(avg_val)
+                    aggregated[param_name] = avg_grad
+        
+        # Calculate average loss
+        avg_loss = sum(result["loss"] for result in gradient_results) / num_devices
+        total_samples = sum(result["num_samples"] for result in gradient_results)
+        
+        return {
+            "aggregated_gradients": aggregated,
+            "average_loss": avg_loss,
+            "total_samples": total_samples,
+            "num_devices": num_devices
+        }
+    
+    def update_model_parameters(self, job_id: str, aggregated_gradients: Dict[str, Any], learning_rate: float):
+        """Update model parameters using aggregated gradients (Master only)"""
+        if job_id not in self.training_jobs:
+            return
+            
+        job = self.training_jobs[job_id]
+        
+        # Apply gradients to update parameters
+        for param_name, gradient in aggregated_gradients.items():
+            if param_name in job.model_parameters:
+                if HAS_NUMPY:
+                    current = np.array(job.model_parameters[param_name])
+                    grad = np.array(gradient)
+                    updated = current - learning_rate * grad
+                    job.model_parameters[param_name] = updated.tolist()
+                else:
+                    # Manual parameter update
+                    current = job.model_parameters[param_name]
+                    if isinstance(current[0], list):  # 2D weights
+                        for r in range(len(current)):
+                            for c in range(len(current[r])):
+                                current[r][c] -= learning_rate * gradient[r][c]
+                    else:  # 1D bias
+                        for i in range(len(current)):
+                            current[i] -= learning_rate * gradient[i]
+    
+    def get_training_status(self, job_id: str) -> Optional[Dict[str, Any]]:
+        """Get current training status"""
+        if job_id not in self.training_jobs:
+            return None
+            
+        job = self.training_jobs[job_id]
+        
+        return {
+            "job_id": job_id,
+            "status": job.status,
+            "current_epoch": job.current_epoch,
+            "total_epochs": job.total_epochs,
+            "progress": (job.current_epoch / job.total_epochs) * 100,
+            "master_device": job.master_device_id,
+            "slave_devices": job.slave_devices,
+            "model_info": {
+                "layers": len(job.model_config["layers"]),
+                "parameters": job.model_config["total_parameters"]
+            }
+        }
+
 class DiscomputeMobile:
     def __init__(self, device_id=None, port=8080, debug=False):
         self.device_id = device_id or f"ios-{int(time.time())}"
@@ -312,6 +664,10 @@ class DiscomputeMobile:
         self.task_executor = TaskExecutor(self.device_capabilities)
         self.submitted_tasks: Dict[str, ComputeTask] = {}
         self.task_results: Dict[str, List[SubTask]] = {}
+        
+        # Distributed training management
+        self.training_manager = DistributedTrainingManager(self.device_id, is_master=False)
+        self.is_master_device = False
         
         print(f"🚀 Discompute Mobile Client")
         print(f"Device ID: {self.device_id}")
@@ -898,6 +1254,147 @@ class DiscomputeMobile:
             
         return tasks
     
+    def set_as_master(self):
+        """Set this device as the master/coordinator"""
+        self.is_master_device = True
+        self.training_manager.is_master = True
+        print(f"🏛️  Device {self.device_id[:8]} is now the MASTER coordinator")
+    
+    def start_distributed_neural_training(self, slave_device_ids: List[str]) -> str:
+        """Start distributed neural network training with specified slave devices"""
+        if not self.is_master_device:
+            print("❌ Only master device can start distributed training")
+            return ""
+            
+        # Verify slave devices are available
+        available_slaves = []
+        for device_id in slave_device_ids:
+            found = False
+            for discovered_device in self.discovered_devices.values():
+                if discovered_device['id'] == device_id:
+                    available_slaves.append(device_id)
+                    found = True
+                    break
+            if not found:
+                print(f"⚠️  Device {device_id} not found in discovered devices")
+        
+        if not available_slaves:
+            print("❌ No valid slave devices found")
+            return ""
+        
+        # Create neural network architecture
+        model_config = self.training_manager.create_neural_network(
+            input_size=20,    # 20 input features
+            hidden_sizes=[64, 32],  # Two hidden layers
+            output_size=10    # 10 output classes
+        )
+        
+        # Training configuration
+        training_config = {
+            "epochs": 5,
+            "batch_size": 16,
+            "learning_rate": 0.01,
+            "num_samples": 1000
+        }
+        
+        job_id = self.training_manager.start_distributed_training(
+            available_slaves, model_config, training_config
+        )
+        
+        # Start training process in background
+        threading.Thread(target=self._run_distributed_training, args=(job_id,), daemon=True).start()
+        
+        return job_id
+    
+    def _run_distributed_training(self, job_id: str):
+        """Run the distributed training process (Master only)"""
+        try:
+            job = self.training_manager.training_jobs[job_id]
+            job.status = "training"
+            
+            print(f"🏃‍♂️ Starting distributed training across {len(job.slave_devices)} devices")
+            
+            for epoch in range(job.total_epochs):
+                print(f"\n📚 Epoch {epoch + 1}/{job.total_epochs}")
+                job.current_epoch = epoch
+                
+                # Distribute batches to slave devices
+                batches = self.training_manager.distribute_epoch_batches(job_id)
+                print(f"   📦 Created {len(batches)} training batches")
+                
+                # For demonstration, simulate processing batches locally
+                # In real implementation, these would be sent to slave devices via gRPC
+                gradient_results = []
+                
+                for batch in batches:
+                    print(f"   🔄 Simulating batch {batch.batch_id[:8]} processing...")
+                    
+                    # Simulate slave device processing
+                    result = self.training_manager.process_training_batch(batch)
+                    gradient_results.append(result)
+                    
+                    # Small delay to simulate network communication
+                    time.sleep(0.1)
+                
+                # Aggregate gradients from all devices
+                aggregated = self.training_manager.aggregate_gradients(job_id, gradient_results)
+                
+                if aggregated:
+                    avg_loss = aggregated["average_loss"]
+                    total_samples = aggregated["total_samples"]
+                    
+                    print(f"   📊 Average loss: {avg_loss:.4f}, Samples: {total_samples}")
+                    
+                    # Update model parameters
+                    self.training_manager.update_model_parameters(
+                        job_id, 
+                        aggregated["aggregated_gradients"], 
+                        job.training_config["learning_rate"]
+                    )
+                    
+                    print(f"   ✅ Model parameters updated")
+                
+                # Small delay between epochs
+                time.sleep(0.5)
+            
+            job.status = "completed"
+            print(f"\n🎉 Distributed training completed for job {job_id[:8]}")
+            
+        except Exception as e:
+            print(f"❌ Error in distributed training: {e}")
+            if job_id in self.training_manager.training_jobs:
+                self.training_manager.training_jobs[job_id].status = "failed"
+    
+    def get_training_jobs(self):
+        """List all training jobs"""
+        if not self.training_manager.training_jobs:
+            print("No training jobs found")
+            return
+            
+        print(f"\n🎯 Training Jobs ({len(self.training_manager.training_jobs)}):")
+        print("=" * 60)
+        
+        for job_id, job in self.training_manager.training_jobs.items():
+            status = self.training_manager.get_training_status(job_id)
+            if status:
+                print(f"Job: {job_id[:8]}...")
+                print(f"  Status: {status['status']}")
+                print(f"  Progress: {status['progress']:.1f}% ({status['current_epoch']}/{status['total_epochs']} epochs)")
+                print(f"  Model: {status['model_info']['layers']} layers, {status['model_info']['parameters']} parameters")
+                print(f"  Workers: {len(status['slave_devices'])} devices")
+                print(f"  Master: {status['master_device'][:8]}...")
+                print()
+    
+    def simulate_slave_mode(self):
+        """Simulate this device acting as a slave worker"""
+        print(f"🤖 Device {self.device_id[:8]} is now in SLAVE mode")
+        print("   Waiting for training batches from master...")
+        
+        # In real implementation, this would listen for gRPC calls from master
+        # For now, just indicate slave mode is active
+        self.is_master_device = False
+        self.training_manager.is_master = False
+    
     def get_stats(self):
         """Get service statistics"""
         uptime = time.time() - self.start_time
@@ -929,7 +1426,9 @@ class DiscomputeMobile:
             'completed_tasks': completed_tasks,
             'running_tasks': running_tasks,
             'failed_tasks': failed_tasks,
-            'active_executor_tasks': len(self.task_executor.running_tasks)
+            'active_executor_tasks': len(self.task_executor.running_tasks),
+            'is_master_device': self.is_master_device,
+            'training_jobs': len(self.training_manager.training_jobs)
         }
 
 def main():
@@ -957,6 +1456,10 @@ def main():
         print("  'tasks' - Show submitted tasks")
         print("  'samples' - Show sample AI tasks")
         print("  'submit <task_type>' - Submit a task (e.g., 'submit matrix')")
+        print("  'master' - Set this device as master coordinator")
+        print("  'slave' - Set this device as slave worker")
+        print("  'train <device_ids>' - Start distributed neural training")
+        print("  'jobs' - Show distributed training jobs")
         print("  'send <device_id> <message>' - Send test message")
         print("  'quit' - Exit")
         print()
@@ -1005,6 +1508,43 @@ def main():
                         print(f"✅ Submitted data processing task: {task_id[:8]}...")
                     else:
                         print("Available task types: matrix, training, data (or numbers 1-3)")
+                elif cmd == 'master':
+                    client.set_as_master()
+                elif cmd == 'slave':
+                    client.simulate_slave_mode()
+                elif cmd == 'jobs':
+                    client.get_training_jobs()
+                elif cmd.startswith('train '):
+                    device_list = cmd.split(' ', 1)[1] if len(cmd.split(' ')) > 1 else ""
+                    if device_list:
+                        # Parse device IDs from command
+                        device_ids = [d.strip() for d in device_list.split(',')]
+                        
+                        # Try to match partial device IDs with discovered devices
+                        matched_devices = []
+                        for partial_id in device_ids:
+                            for device_id, device_info in client.discovered_devices.items():
+                                if device_info['id'].startswith(partial_id) or partial_id in device_info['id']:
+                                    matched_devices.append(device_info['id'])
+                                    break
+                        
+                        if matched_devices:
+                            print(f"Starting distributed training with devices: {[d[:8] + '...' for d in matched_devices]}")
+                            job_id = client.start_distributed_neural_training(matched_devices)
+                            if job_id:
+                                print(f"✅ Started training job: {job_id[:8]}...")
+                        else:
+                            print("❌ No matching devices found")
+                            print("Available devices:")
+                            for device_id, device_info in client.discovered_devices.items():
+                                print(f"  {device_info['id'][:8]}... ({device_info['name']})")
+                    else:
+                        print("Usage: train <device_id1>,<device_id2>,...")
+                        print("Example: train abc123,def456")
+                        if client.discovered_devices:
+                            print("Available devices:")
+                            for device_id, device_info in client.discovered_devices.items():
+                                print(f"  {device_info['id'][:8]}... ({device_info['name']})")
                 elif cmd.startswith('send '):
                     parts = cmd.split(' ', 2)
                     if len(parts) >= 3:
@@ -1012,7 +1552,7 @@ def main():
                     else:
                         print("Usage: send <device_id> <message>")
                 elif cmd == 'help':
-                    print("Available commands: list, info, stats, debug, test, tasks, samples, submit, send, quit")
+                    print("Available commands: list, info, stats, debug, test, tasks, samples, submit, master, slave, train, jobs, send, quit")
                 elif cmd == '':
                     continue
                 else:
