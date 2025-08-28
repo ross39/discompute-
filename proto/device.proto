@@ -1,0 +1,203 @@
+syntax = "proto3";
+
+package discompute;
+
+option go_package = "github.com/rossheaney/discompute/proto";
+
+// DeviceService handles device-to-device communication and compute tasks
+service DeviceService {
+  // RegisterDevice registers a device in the network
+  rpc RegisterDevice(RegisterDeviceRequest) returns (RegisterDeviceResponse);
+  
+  // SendMessage sends a message between devices
+  rpc SendMessage(SendMessageRequest) returns (SendMessageResponse);
+  
+  // Heartbeat maintains connection and reports device status
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+  
+  // GetDevices returns list of available devices
+  rpc GetDevices(GetDevicesRequest) returns (GetDevicesResponse);
+  
+  // SubmitTask submits a compute task to be distributed
+  rpc SubmitTask(SubmitTaskRequest) returns (SubmitTaskResponse);
+  
+  // GetTaskStatus gets the status of a submitted task
+  rpc GetTaskStatus(GetTaskStatusRequest) returns (GetTaskStatusResponse);
+  
+  // ExecuteSubtask executes a subtask on this device
+  rpc ExecuteSubtask(ExecuteSubtaskRequest) returns (ExecuteSubtaskResponse);
+}
+
+// Device information
+message Device {
+  string id = 1;
+  string name = 2;
+  string type = 3; // "mac", "iphone", "ipad", "android", "linux", etc.
+  string address = 4; // IP:port
+  DeviceCapabilities capabilities = 5;
+  int64 last_seen = 6; // Unix timestamp
+  DeviceStatus status = 7;
+  ComputeMetrics compute_metrics = 8; // Performance metrics
+}
+
+// Device capabilities (enhanced for compute tasks)
+message DeviceCapabilities {
+  int32 cpu_cores = 1;
+  int64 memory_mb = 2;
+  bool has_gpu = 3;
+  string gpu_type = 4;
+  double battery_level = 5; // 0.0 to 1.0, -1 if not applicable
+  bool is_charging = 6;
+  
+  // Compute performance (TFLOPS)
+  double fp32_tflops = 7;
+  double fp16_tflops = 8;
+  double int8_tflops = 9;
+  
+  // Platform specific
+  string chip = 10; // Apple M1, A18 Pro, etc.
+  string os_version = 11;
+  bool supports_metal = 12; // iOS/macOS GPU compute
+  bool supports_cuda = 13;  // NVIDIA GPU compute
+}
+
+// Device status
+enum DeviceStatus {
+  UNKNOWN = 0;
+  AVAILABLE = 1;
+  BUSY = 2;
+  OFFLINE = 3;
+  OVERLOADED = 4;
+}
+
+// Compute performance metrics
+message ComputeMetrics {
+  double cpu_usage = 1;      // 0.0 to 1.0
+  double memory_usage = 2;   // 0.0 to 1.0
+  double gpu_usage = 3;      // 0.0 to 1.0
+  double temperature = 4;    // Celsius
+  int32 active_tasks = 5;    // Number of running tasks
+  double throughput = 6;     // Tasks/second
+}
+
+// Task definitions for compute distribution
+message ComputeTask {
+  string task_id = 1;
+  string task_type = 2;    // "training", "inference", "data_processing"
+  bytes task_data = 3;     // Serialized task parameters
+  map<string, string> metadata = 4;
+  repeated string required_capabilities = 5; // e.g., ["gpu", "fp16"]
+  int32 estimated_duration_seconds = 6;
+  int32 priority = 7;      // 1-10, higher = more important
+}
+
+message SubTask {
+  string subtask_id = 1;
+  string parent_task_id = 2;
+  int32 subtask_index = 3;
+  bytes subtask_data = 4;
+  string assigned_device_id = 5;
+  SubTaskStatus status = 6;
+  int64 started_at = 7;
+  int64 completed_at = 8;
+  bytes result_data = 9;
+  string error_message = 10;
+}
+
+enum SubTaskStatus {
+  PENDING = 0;
+  ASSIGNED = 1;
+  RUNNING = 2;
+  COMPLETED = 3;
+  FAILED = 4;
+  CANCELLED = 5;
+}
+
+// Register device request/response
+message RegisterDeviceRequest {
+  Device device = 1;
+}
+
+message RegisterDeviceResponse {
+  bool success = 1;
+  string message = 2;
+  repeated Device known_devices = 3;
+}
+
+// Send message request/response
+message SendMessageRequest {
+  string from_device_id = 1;
+  string to_device_id = 2;
+  string message_type = 3;
+  bytes payload = 4;
+  map<string, string> metadata = 5;
+}
+
+message SendMessageResponse {
+  bool success = 1;
+  string message = 2;
+  int64 timestamp = 3;
+}
+
+// Heartbeat request/response
+message HeartbeatRequest {
+  string device_id = 1;
+  DeviceCapabilities capabilities = 2;
+  DeviceStatus status = 3;
+  ComputeMetrics metrics = 4;
+}
+
+message HeartbeatResponse {
+  bool success = 1;
+  repeated Device updated_devices = 2;
+  repeated ComputeTask pending_tasks = 3; // Tasks waiting for this device
+}
+
+// Get devices request/response
+message GetDevicesRequest {
+  string requesting_device_id = 1;
+  string filter_type = 2; // Optional: filter by device type
+}
+
+message GetDevicesResponse {
+  repeated Device devices = 1;
+}
+
+// Task submission and management
+message SubmitTaskRequest {
+  ComputeTask task = 1;
+  string submitting_device_id = 2;
+  int32 max_devices = 3;        // Maximum devices to use
+  int32 target_subtasks = 4;    // How many subtasks to split into
+}
+
+message SubmitTaskResponse {
+  bool success = 1;
+  string message = 2;
+  string task_id = 3;
+  repeated SubTask subtasks = 4;
+}
+
+message GetTaskStatusRequest {
+  string task_id = 1;
+  string requesting_device_id = 2;
+}
+
+message GetTaskStatusResponse {
+  bool success = 1;
+  ComputeTask task = 2;
+  repeated SubTask subtasks = 3;
+  double completion_percentage = 4;
+  int64 estimated_completion_time = 5;
+}
+
+message ExecuteSubtaskRequest {
+  SubTask subtask = 1;
+  string executing_device_id = 2;
+}
+
+message ExecuteSubtaskResponse {
+  bool success = 1;
+  string message = 2;
+  SubTask completed_subtask = 3;
+}
