@@ -499,16 +499,29 @@ class MacWorkerClient:
             
             while True:
                 try:
+                    # Convert capabilities to Go-compatible format
+                    device_caps = {
+                        "model": self.capabilities.model,
+                        "chip": self.capabilities.chip,
+                        "memory": self.capabilities.memory_mb,  # Go expects "memory" not "memory_mb"
+                        "type": self.capabilities.device_type,
+                        "flops": {
+                            "fp32": self.capabilities.fp32_tflops,
+                            "fp16": self.capabilities.fp16_tflops,
+                            "int8": self.capabilities.int8_tflops
+                        }
+                    }
+                    
                     message = {
                         "type": "discovery",
                         "node_id": self.node_id,
                         "grpc_port": 50051,
                         "http_port": self.http_port,
-                        "device_capabilities": asdict(self.capabilities),
+                        "device_capabilities": device_caps,
                         "priority": self._get_priority(),
                         "interface_name": "wifi",
                         "interface_type": "wifi",
-                        "timestamp": time.time()
+                        "timestamp": int(time.time())  # Go expects int64, not float
                     }
                     
                     data = json.dumps(message).encode('utf-8')
