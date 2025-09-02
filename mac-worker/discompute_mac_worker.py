@@ -396,6 +396,29 @@ class TrainingRequestHandler(http.server.BaseHTTPRequestHandler):
         self.mac_worker = mac_worker
         super().__init__(*args, **kwargs)
     
+    def do_GET(self):
+        """Handle GET requests for health checks"""
+        try:
+            if self.path == '/api/health':
+                response = {'success': True, 'message': 'Mac device healthy', 'framework': ML_FRAMEWORK}
+                self.send_response(200)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps(response).encode('utf-8'))
+            elif self.path == '/api/device/info':
+                response = self.mac_worker.handle_get_device_info()
+                self.send_response(200)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps(response).encode('utf-8'))
+            else:
+                self.send_response(404)
+                self.end_headers()
+        except Exception as e:
+            logger.error(f"Error handling GET request: {e}")
+            self.send_response(500)
+            self.end_headers()
+    
     def do_POST(self):
         """Handle POST requests"""
         try:
@@ -414,6 +437,8 @@ class TrainingRequestHandler(http.server.BaseHTTPRequestHandler):
                 response = self.mac_worker.handle_model_update(request_data.get('update', {}))
             elif action == 'get_metrics':
                 response = self.mac_worker.handle_get_metrics()
+            elif action == 'get_device_info':
+                response = self.mac_worker.handle_get_device_info()
             elif action == 'health_check':
                 response = {'success': True, 'message': 'Mac device healthy', 'framework': ML_FRAMEWORK}
             elif action == 'shutdown_training':
@@ -703,6 +728,16 @@ class MacWorkerClient:
             'metrics': self.metrics.copy(),
             'device_info': asdict(self.capabilities),
             'framework': ML_FRAMEWORK
+        }
+    
+    def handle_get_device_info(self) -> Dict[str, Any]:
+        """Handle device info request"""
+        return {
+            'success': True,
+            'device_info': asdict(self.capabilities),
+            'framework': ML_FRAMEWORK,
+            'node_id': self.node_id,
+            'training_active': self.training_active
         }
     
     def handle_shutdown_training(self) -> Dict[str, Any]:
