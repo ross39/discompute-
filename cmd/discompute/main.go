@@ -2,441 +2,337 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
+	"flag"
 	"fmt"
 	"os"
 	"os/signal"
-	"runtime"
-	"strings"
 	"syscall"
 	"time"
 
-	"github.com/rossheaney/discompute/internal/client"
+	"github.com/google/uuid"
 	"github.com/rossheaney/discompute/internal/device"
 	"github.com/rossheaney/discompute/internal/discovery"
 	"github.com/rossheaney/discompute/internal/server"
-	pb "github.com/rossheaney/discompute/proto"
+	"github.com/rossheaney/discompute/internal/training"
 	"github.com/sirupsen/logrus"
-	"github.com/spf13/cobra"
-	"github.com/spf13/viper"
 )
 
 var (
-	logger = logrus.New()
+	nodeID        = flag.String("node-id", "", "Node ID (auto-generated if empty)")
+	nodePort      = flag.Int("node-port", 50051, "gRPC server port")
+	httpPort      = flag.Int("http-port", 8080, "HTTP API port")
+	listenPort    = flag.Int("listen-port", 5005, "UDP discovery listen port")
+	broadcastPort = flag.Int("broadcast-port", 5005, "UDP discovery broadcast port")
+	logLevel      = flag.String("log-level", "info", "Log level (debug, info, warn, error)")
+	mode          = flag.String("mode", "server", "Run mode: server, client, or training")
 
-	// Global configuration
-	cfgFile   string
-	debug     bool
-	port      int
-	deviceID  string
-	enableTLS bool
+	// Training specific flags
+	trainingModel  = flag.String("training-model", "mnist_cnn", "Training model type")
+	trainingEpochs = flag.Int("training-epochs", 10, "Number of training epochs")
+	trainingBatch  = flag.Int("training-batch", 32, "Training batch size")
+	trainingLR     = flag.Float64("training-lr", 0.001, "Learning rate")
+	maxDevices     = flag.Int("max-devices", 4, "Maximum devices for training")
 )
 
-// rootCmd represents the base command when called without any subcommands
-var rootCmd = &cobra.Command{
-	Use:   "discompute",
-	Short: "Distributed compute system for cross-device AI/ML workloads",
-	Long: `discompute is a distributed compute system that enables AI/ML workloads 
-to be distributed across multiple devices including MacBooks, iPhones, iPads, and other platforms.
-
-This tool handles device discovery via UDP broadcasts, task scheduling, and secure communication 
-between devices in the network. Based on peer-to-peer architecture inspired by EXO.`,
-}
-
-// startCmd represents the start command
-var startCmd = &cobra.Command{
-	Use:   "start",
-	Short: "Start the discompute service",
-	Long: `Start the discompute service which will:
-- Advertise this device on the local network via UDP broadcasts
-- Discover other discompute devices using UDP discovery  
-- Start the gRPC server for communication
-- Begin accepting compute tasks`,
-	Run: func(cmd *cobra.Command, args []string) {
-		runStart()
-	},
-}
-
-// sendCmd represents the send command for testing
-var sendCmd = &cobra.Command{
-	Use:   "send [target-device-id] [message]",
-	Short: "Send a test message to another device",
-	Long:  `Send a test text message to another device for testing connectivity.`,
-	Args:  cobra.ExactArgs(2),
-	Run: func(cmd *cobra.Command, args []string) {
-		targetDeviceID := args[0]
-		message := args[1]
-		runSend(targetDeviceID, message)
-	},
-}
-
-// listCmd represents the list command
-var listCmd = &cobra.Command{
-	Use:   "list",
-	Short: "List discovered devices",
-	Long:  `List all devices discovered on the local network via UDP broadcasts.`,
-	Run: func(cmd *cobra.Command, args []string) {
-		runList()
-	},
-}
-
-// infoCmd shows device information
-var infoCmd = &cobra.Command{
-	Use:   "info",
-	Short: "Show this device's capabilities",
-	Long:  `Display detailed information about this device's compute capabilities.`,
-	Run: func(cmd *cobra.Command, args []string) {
-		runInfo()
-	},
-}
-
-func init() {
-	cobra.OnInitialize(initConfig)
-
-	// Global flags
-	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.discompute.yaml)")
-	rootCmd.PersistentFlags().BoolVar(&debug, "debug", false, "enable debug logging")
-	rootCmd.PersistentFlags().IntVar(&port, "port", 8080, "port to listen on")
-	rootCmd.PersistentFlags().StringVar(&deviceID, "device-id", "", "unique device identifier (auto-generated if not provided)")
-	rootCmd.PersistentFlags().BoolVar(&enableTLS, "tls", false, "enable TLS encryption")
-
-	// Bind flags to viper
-	viper.BindPFlag("debug", rootCmd.PersistentFlags().Lookup("debug"))
-	viper.BindPFlag("port", rootCmd.PersistentFlags().Lookup("port"))
-	viper.BindPFlag("device-id", rootCmd.PersistentFlags().Lookup("device-id"))
-	viper.BindPFlag("tls", rootCmd.PersistentFlags().Lookup("tls"))
-
-	// Add subcommands
-	rootCmd.AddCommand(startCmd)
-	rootCmd.AddCommand(sendCmd)
-	rootCmd.AddCommand(listCmd)
-	rootCmd.AddCommand(infoCmd)
-}
-
-func initConfig() {
-	if cfgFile != "" {
-		viper.SetConfigFile(cfgFile)
-	} else {
-		home, err := os.UserHomeDir()
-		cobra.CheckErr(err)
-
-		viper.AddConfigPath(home)
-		viper.SetConfigType("yaml")
-		viper.SetConfigName(".discompute")
-	}
-
-	viper.AutomaticEnv()
-
-	if err := viper.ReadInConfig(); err == nil {
-		logger.WithField("config", viper.ConfigFileUsed()).Info("Using config file")
-	}
-
-	// Configure logging
-	if viper.GetBool("debug") || debug {
-		logger.SetLevel(logrus.DebugLevel)
-		logger.Debug("Debug logging enabled")
-	}
-}
-
 func main() {
-	if err := rootCmd.Execute(); err != nil {
-		logger.WithError(err).Fatal("Command execution failed")
+	flag.Parse()
+
+	// Setup logging
+	logger := logrus.New()
+	level, err := logrus.ParseLevel(*logLevel)
+	if err != nil {
+		logger.Fatal("Invalid log level:", err)
 	}
+	logger.SetLevel(level)
+
+	// Generate node ID if not provided
+	if *nodeID == "" {
+		*nodeID = fmt.Sprintf("discompute_%s", uuid.New().String()[:8])
+	}
+
+	logger.WithFields(logrus.Fields{
+		"node_id":   *nodeID,
+		"mode":      *mode,
+		"node_port": *nodePort,
+		"http_port": *httpPort,
+	}).Info("Starting Discompute")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Setup signal handling
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+
+	switch *mode {
+	case "server":
+		err = runServer(ctx, logger)
+	case "client":
+		err = runClient(ctx, logger)
+	case "training":
+		err = runTraining(ctx, logger)
+	default:
+		logger.Fatal("Invalid mode. Use: server, client, or training")
+	}
+
+	if err != nil {
+		logger.Fatal("Error:", err)
+	}
+
+	// Wait for shutdown signal
+	<-sigChan
+	logger.Info("Shutdown signal received, stopping...")
+	cancel()
+
+	// Give services time to shutdown gracefully
+	time.Sleep(2 * time.Second)
+	logger.Info("Discompute stopped")
 }
 
-func runStart() {
-	// Generate device ID if not provided
-	if deviceID == "" {
-		deviceID = viper.GetString("device-id")
-		if deviceID == "" {
-			deviceID = generateDeviceID()
-			logger.WithField("device_id", deviceID).Info("Generated device ID")
-		}
-	}
-
-	// Get port from config
-	if port == 8080 {
-		port = viper.GetInt("port")
-		if port == 0 {
-			port = 8080
-		}
-	}
-
-	// Get TLS setting
-	if !enableTLS {
-		enableTLS = viper.GetBool("tls")
-	}
-
-	logger.WithFields(logrus.Fields{
-		"device_id": deviceID,
-		"port":      port,
-		"tls":       enableTLS,
-	}).Info("Starting discompute service")
-
-	// Show device capabilities
-	caps := device.GetDeviceCapabilities(logger)
-	logger.WithFields(logrus.Fields{
-		"model":  caps.Model,
-		"chip":   caps.Chip,
-		"type":   caps.Type,
-		"memory": fmt.Sprintf("%d MB", caps.Memory),
-		"fp32":   fmt.Sprintf("%.2f TFLOPS", caps.Flops.FP32),
-		"fp16":   fmt.Sprintf("%.2f TFLOPS", caps.Flops.FP16),
-		"int8":   fmt.Sprintf("%.2f TFLOPS", caps.Flops.INT8),
-	}).Info("Device capabilities detected")
+func runServer(ctx context.Context, logger *logrus.Logger) error {
+	logger.Info("Starting in server mode...")
 
 	// Create device registry
 	registry := device.NewRegistry(logger)
 
-	// Create and start gRPC server
-	grpcServer := server.NewGRPCServer(registry, port, logger)
-
-	// Register basic message handler
-	basicHandler := server.NewBasicMessageHandler(logger)
-	grpcServer.RegisterMessageHandler("text", basicHandler)
-
-	if err := grpcServer.Start(); err != nil {
-		logger.WithError(err).Fatal("Failed to start gRPC server")
-	}
-	defer grpcServer.Stop()
-
-	// Create UDP discovery service
-	udpDiscovery := discovery.NewUDPDiscovery(deviceID, port, logger)
+	// Create UDP discovery
+	udpDiscovery := discovery.NewUDPDiscovery(*nodeID, *nodePort, logger)
+	udpDiscovery.SetPorts(*listenPort, *broadcastPort)
 
 	// Set discovery callbacks
 	udpDiscovery.SetCallbacks(
-		func(deviceInfo discovery.DiscoveredDevice) {
-			// Device found callback
-			registry.RegisterDeviceFromDiscovery(deviceInfo)
+		func(discoveredDevice discovery.DiscoveredDevice) {
+			logger.WithFields(logrus.Fields{
+				"device_id":   discoveredDevice.ID,
+				"device_name": discoveredDevice.Name,
+				"device_type": discoveredDevice.Type,
+				"address":     fmt.Sprintf("%s:%d", discoveredDevice.Address, discoveredDevice.Port),
+			}).Info("Device discovered")
+
+			// Convert to protobuf device and register
+			// This is a simplified conversion - in practice you'd want proper mapping
+			// registry.RegisterDevice(convertToProtoDevice(discoveredDevice))
 		},
 		func(deviceID string) {
-			// Device lost callback
+			logger.WithField("device_id", deviceID).Info("Device lost")
 			registry.UnregisterDevice(deviceID)
 		},
 	)
 
-	// Start discovery service
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
+	// Start UDP discovery
 	if err := udpDiscovery.Start(ctx); err != nil {
-		logger.WithError(err).Error("Failed to start UDP discovery, continuing without it")
-	} else {
-		defer udpDiscovery.Stop()
+		return fmt.Errorf("failed to start UDP discovery: %w", err)
 	}
+	defer udpDiscovery.Stop()
 
-	// Register this device in the registry
-	thisDevice := &pb.Device{
-		Id:      deviceID,
-		Name:    caps.Model,
-		Type:    caps.Type,
-		Address: fmt.Sprintf("localhost:%d", port),
-		Capabilities: &pb.DeviceCapabilities{
-			CpuCores:     int32(runtime.NumCPU()),
-			MemoryMb:     caps.Memory,
-			HasGpu:       caps.Flops.FP16 > 0,
-			GpuType:      caps.Chip,
-			BatteryLevel: -1,
-			IsCharging:   false,
-			Fp32Tflops:   caps.Flops.FP32,
-			Fp16Tflops:   caps.Flops.FP16,
-			Int8Tflops:   caps.Flops.INT8,
-			Chip:         caps.Chip,
+	// Create gRPC server
+	grpcServer := server.NewGRPCServer(registry, *nodePort, logger)
+
+	// Register message handlers
+	basicHandler := server.NewBasicMessageHandler(logger)
+	grpcServer.RegisterMessageHandler("basic", basicHandler)
+
+	// Start gRPC server
+	if err := grpcServer.Start(); err != nil {
+		return fmt.Errorf("failed to start gRPC server: %w", err)
+	}
+	defer grpcServer.Stop()
+
+	// Create distributed trainer
+	trainer := training.NewDistributedTrainer(registry, logger)
+	_ = trainer // Used for future training endpoints
+
+	logger.Info("Server started successfully")
+	logger.WithFields(logrus.Fields{
+		"grpc_port":      *nodePort,
+		"udp_port":       *listenPort,
+		"broadcast_port": *broadcastPort,
+	}).Info("Listening for connections")
+
+	// Keep running until context is cancelled
+	<-ctx.Done()
+	return nil
+}
+
+func runClient(ctx context.Context, logger *logrus.Logger) error {
+	logger.Info("Starting in client mode...")
+
+	// Create device registry (for local device info)
+	registry := device.NewRegistry(logger)
+	_ = registry // Used for device management
+
+	// Create UDP discovery
+	udpDiscovery := discovery.NewUDPDiscovery(*nodeID, *nodePort, logger)
+	udpDiscovery.SetPorts(*listenPort, *broadcastPort)
+
+	// Set discovery callbacks for client mode
+	udpDiscovery.SetCallbacks(
+		func(discoveredDevice discovery.DiscoveredDevice) {
+			logger.WithFields(logrus.Fields{
+				"server_id":   discoveredDevice.ID,
+				"server_type": discoveredDevice.Type,
+				"address":     fmt.Sprintf("%s:%d", discoveredDevice.Address, discoveredDevice.Port),
+			}).Info("Server discovered")
 		},
-		Status: pb.DeviceStatus_AVAILABLE,
-	}
-	registry.RegisterDevice(thisDevice)
+		func(deviceID string) {
+			logger.WithField("server_id", deviceID).Info("Server lost")
+		},
+	)
 
-	// Start cleanup routine for stale devices
+	// Start UDP discovery
+	if err := udpDiscovery.Start(ctx); err != nil {
+		return fmt.Errorf("failed to start UDP discovery: %w", err)
+	}
+	defer udpDiscovery.Stop()
+
+	logger.Info("Client started successfully")
+	logger.Info("Broadcasting presence and looking for servers...")
+
+	// Keep running until context is cancelled
+	<-ctx.Done()
+	return nil
+}
+
+func runTraining(ctx context.Context, logger *logrus.Logger) error {
+	logger.Info("Starting distributed training demo...")
+
+	// Create device registry
+	registry := device.NewRegistry(logger)
+
+	// Create UDP discovery
+	udpDiscovery := discovery.NewUDPDiscovery(*nodeID, *nodePort, logger)
+	udpDiscovery.SetPorts(*listenPort, *broadcastPort)
+
+	// Track discovered devices
+	discoveredDevices := make(map[string]discovery.DiscoveredDevice)
+
+	udpDiscovery.SetCallbacks(
+		func(discoveredDevice discovery.DiscoveredDevice) {
+			discoveredDevices[discoveredDevice.ID] = discoveredDevice
+			logger.WithFields(logrus.Fields{
+				"device_id":     discoveredDevice.ID,
+				"device_type":   discoveredDevice.Type,
+				"total_devices": len(discoveredDevices),
+			}).Info("Training device discovered")
+		},
+		func(deviceID string) {
+			delete(discoveredDevices, deviceID)
+			logger.WithField("device_id", deviceID).Info("Training device lost")
+		},
+	)
+
+	// Start UDP discovery
+	if err := udpDiscovery.Start(ctx); err != nil {
+		return fmt.Errorf("failed to start UDP discovery: %w", err)
+	}
+	defer udpDiscovery.Stop()
+
+	// Create distributed trainer
+	trainer := training.NewDistributedTrainer(registry, logger)
+
+	// Wait for devices to be discovered
+	logger.Info("Waiting for iOS devices to join the training cluster...")
+	logger.Info("Make sure your iOS devices are running the enhanced client!")
+
+	waitTime := 30 * time.Second
+	timer := time.NewTimer(waitTime)
+	defer timer.Stop()
+
+	select {
+	case <-timer.C:
+		logger.Info("Discovery period ended")
+	case <-ctx.Done():
+		return nil
+	}
+
+	// Check if we have enough devices
+	iosDevices := 0
+	for _, device := range discoveredDevices {
+		if device.Type == "iphone" || device.Type == "ipad" || device.Type == "ios" {
+			iosDevices++
+		}
+	}
+
+	if iosDevices == 0 {
+		logger.Warn("No iOS devices discovered. Make sure:")
+		logger.Warn("  1. iOS devices are running discompute_ios_enhanced.py")
+		logger.Warn("  2. All devices are on the same network")
+		logger.Warn("  3. UDP port 5005 is not blocked")
+		return fmt.Errorf("no iOS devices available for training")
+	}
+
+	logger.WithField("ios_devices", iosDevices).Info("Found iOS devices, starting training...")
+
+	// Create training configuration
+	config := training.TrainingConfig{
+		ModelType:        *trainingModel,
+		BatchSize:        *trainingBatch,
+		LearningRate:     *trainingLR,
+		Epochs:           *trainingEpochs,
+		DistributionMode: "data_parallel",
+		Optimizer:        "adam",
+		Parameters: map[string]interface{}{
+			"input_size":  784, // MNIST 28x28
+			"num_classes": 10,  // 10 digits
+		},
+	}
+
+	// Start training job
+	job, err := trainer.StartTrainingJob(ctx, config, *maxDevices)
+	if err != nil {
+		return fmt.Errorf("failed to start training job: %w", err)
+	}
+
+	logger.WithFields(logrus.Fields{
+		"job_id":         job.JobID,
+		"model_type":     job.Config.ModelType,
+		"epochs":         job.Config.Epochs,
+		"batch_size":     job.Config.BatchSize,
+		"master_device":  job.MasterDevice,
+		"worker_devices": len(job.WorkerDevices),
+	}).Info("Distributed training job started!")
+
+	// Monitor training progress
 	go func() {
-		ticker := time.NewTicker(1 * time.Minute)
+		ticker := time.NewTicker(10 * time.Second)
 		defer ticker.Stop()
 
 		for {
 			select {
+			case <-ticker.C:
+				job, exists := trainer.GetTrainingJob(job.JobID)
+				if !exists {
+					return
+				}
+
+				logger.WithFields(logrus.Fields{
+					"job_id":       job.JobID,
+					"status":       job.Status,
+					"epoch":        job.CurrentEpoch,
+					"total_epochs": job.Config.Epochs,
+					"avg_loss":     job.Metrics["avg_loss"],
+					"avg_accuracy": job.Metrics["avg_accuracy"],
+				}).Info("Training progress")
+
+				if job.Status == "completed" || job.Status == "failed" {
+					return
+				}
+
 			case <-ctx.Done():
 				return
-			case <-ticker.C:
-				registry.CleanupStaleDevices(3 * time.Minute)
 			}
 		}
 	}()
 
-	logger.Info("discompute service is running and ready for distributed compute tasks")
+	logger.Info("Training in progress... Press Ctrl+C to stop")
 
-	// Wait for interrupt signal
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-	<-sigChan
+	// Wait for completion or cancellation
+	<-ctx.Done()
 
-	logger.Info("Shutting down discompute service")
-}
-
-func runSend(targetDeviceID, message string) {
-	// Generate device ID if not provided
-	if deviceID == "" {
-		deviceID = generateDeviceID()
+	// Stop training job
+	if err := trainer.StopTrainingJob(job.JobID); err != nil {
+		logger.WithError(err).Error("Failed to stop training job")
 	}
 
-	// Connect to local server
-	serverAddr := fmt.Sprintf("localhost:%d", viper.GetInt("port"))
-	if viper.GetInt("port") == 0 {
-		serverAddr = "localhost:8080"
-	}
-
-	grpcClient := client.NewGRPCClient(serverAddr, viper.GetBool("tls"), logger)
-
-	if err := grpcClient.Connect(); err != nil {
-		logger.WithError(err).Fatal("Failed to connect to discompute service")
-	}
-	defer grpcClient.Disconnect()
-
-	// Send the message
-	err := grpcClient.SendTextMessage(deviceID, targetDeviceID, message)
-	if err != nil {
-		logger.WithError(err).Fatal("Failed to send message")
-	}
-
-	logger.WithFields(logrus.Fields{
-		"target":  targetDeviceID,
-		"message": message,
-	}).Info("Message sent successfully")
-}
-
-func runList() {
-	// Generate device ID if not provided
-	if deviceID == "" {
-		deviceID = generateDeviceID()
-	}
-
-	// Connect to local server
-	serverAddr := fmt.Sprintf("localhost:%d", viper.GetInt("port"))
-	if viper.GetInt("port") == 0 {
-		serverAddr = "localhost:8080"
-	}
-
-	grpcClient := client.NewGRPCClient(serverAddr, viper.GetBool("tls"), logger)
-
-	if err := grpcClient.Connect(); err != nil {
-		logger.WithError(err).Fatal("Failed to connect to discompute service")
-	}
-	defer grpcClient.Disconnect()
-
-	// Get devices list
-	resp, err := grpcClient.GetDevices(deviceID)
-	if err != nil {
-		logger.WithError(err).Fatal("Failed to get devices list")
-	}
-
-	if len(resp.Devices) == 0 {
-		fmt.Println("No devices found")
-		return
-	}
-
-	fmt.Printf("Found %d device(s):\n\n", len(resp.Devices))
-
-	for _, device := range resp.Devices {
-		fmt.Printf("Device ID: %s\n", device.Id)
-		fmt.Printf("  Name: %s\n", device.Name)
-		fmt.Printf("  Type: %s\n", device.Type)
-		fmt.Printf("  Address: %s\n", device.Address)
-		fmt.Printf("  Status: %s\n", device.Status.String())
-		if device.Capabilities != nil {
-			fmt.Printf("  Capabilities:\n")
-			fmt.Printf("    CPU Cores: %d\n", device.Capabilities.CpuCores)
-			fmt.Printf("    Memory: %d MB\n", device.Capabilities.MemoryMb)
-			fmt.Printf("    GPU: %t (%s)\n", device.Capabilities.HasGpu, device.Capabilities.GpuType)
-			if device.Capabilities.Fp32Tflops > 0 {
-				fmt.Printf("    Compute Performance:\n")
-				fmt.Printf("      FP32: %.2f TFLOPS\n", device.Capabilities.Fp32Tflops)
-				fmt.Printf("      FP16: %.2f TFLOPS\n", device.Capabilities.Fp16Tflops)
-				fmt.Printf("      INT8: %.2f TFLOPS\n", device.Capabilities.Int8Tflops)
-			}
-			if device.Capabilities.BatteryLevel >= 0 {
-				fmt.Printf("    Battery: %.1f%%", device.Capabilities.BatteryLevel*100)
-				if device.Capabilities.IsCharging {
-					fmt.Printf(" (charging)")
-				}
-				fmt.Println()
-			}
-		}
-		fmt.Printf("  Last Seen: %s\n", time.Unix(device.LastSeen, 0).Format(time.RFC3339))
-		fmt.Println()
-	}
-}
-
-func runInfo() {
-	caps := device.GetDeviceCapabilities(logger)
-
-	fmt.Printf("Device Information:\n\n")
-	fmt.Printf("Model: %s\n", caps.Model)
-	fmt.Printf("Chip: %s\n", caps.Chip)
-	fmt.Printf("Type: %s\n", caps.Type)
-	fmt.Printf("Memory: %d MB\n", caps.Memory)
-	fmt.Printf("\nCompute Performance:\n")
-	fmt.Printf("  FP32: %.2f TFLOPS\n", caps.Flops.FP32)
-	fmt.Printf("  FP16: %.2f TFLOPS\n", caps.Flops.FP16)
-	fmt.Printf("  INT8: %.2f TFLOPS\n", caps.Flops.INT8)
-	fmt.Printf("\nPlatform: %s/%s\n", runtime.GOOS, runtime.GOARCH)
-	fmt.Printf("CPU Cores: %d\n", runtime.NumCPU())
-
-	// Show what this device would be good for
-	fmt.Printf("\nRecommended Use Cases:\n")
-	if caps.Flops.FP32 > 10.0 {
-		fmt.Printf("  ✓ High-performance training tasks\n")
-		fmt.Printf("  ✓ Large model inference\n")
-	} else if caps.Flops.FP32 > 2.0 {
-		fmt.Printf("  ✓ Medium-scale training tasks\n")
-		fmt.Printf("  ✓ Model inference\n")
-	} else {
-		fmt.Printf("  ✓ Data preprocessing\n")
-		fmt.Printf("  ✓ Small model inference\n")
-	}
-
-	if caps.Type == "iphone" || caps.Type == "ipad" {
-		fmt.Printf("  ✓ Mobile AI applications\n")
-		fmt.Printf("  ✓ Edge computing tasks\n")
-	}
-}
-
-func generateDeviceID() string {
-	bytes := make([]byte, 8)
-	rand.Read(bytes)
-	return fmt.Sprintf("%x", bytes)
-}
-
-func getDeviceName() string {
-	if name := os.Getenv("DEVICE_NAME"); name != "" {
-		return name
-	}
-
-	hostname, err := os.Hostname()
-	if err != nil {
-		return "discompute-device"
-	}
-
-	return hostname
-}
-
-func getDeviceType() string {
-	switch runtime.GOOS {
-	case "darwin":
-		// Try to determine if it's iOS or macOS
-		if strings.Contains(runtime.GOARCH, "arm") {
-			// Could be iOS or Apple Silicon Mac
-			// For now, assume macOS - this would need more sophisticated detection
-			return "mac"
-		}
-		return "mac"
-	case "linux":
-		return "linux"
-	case "windows":
-		return "windows"
-	case "android":
-		return "android"
-	case "ios":
-		return "iphone"
-	default:
-		return "unknown"
-	}
+	return nil
 }

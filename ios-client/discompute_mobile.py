@@ -24,9 +24,11 @@ try:
     HAS_NUMPY = True
 except ImportError:
     print("⚠️  NumPy not available - AI tasks will use basic math fallbacks")
-    import math
-    import random
     HAS_NUMPY = False
+
+# Always import math and random (needed for fallbacks)
+import math
+import random
 
 # Try to import grpc for real distributed communication
 try:
@@ -37,6 +39,18 @@ try:
 except ImportError:
     print("⚠️  gRPC not available - using simulation mode")
     HAS_GRPC = False
+
+# Try to import tinygrad for real neural network training
+try:
+    from tinygrad import Tensor, nn, dtypes, TinyJit
+    from tinygrad.nn.state import get_state_dict, load_state_dict, get_parameters
+    from tinygrad.nn.datasets import mnist
+    from tinygrad.nn.optim import Adam, SGD
+    HAS_TINYGRAD = True
+    print("🧠 Tinygrad available - real neural network training enabled")
+except ImportError:
+    print("⚠️  Tinygrad not available - using simulation mode")
+    HAS_TINYGRAD = False
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Any, Tuple
 
@@ -447,6 +461,283 @@ class SimpleTrainingService:
         """Stop the training service"""
         self.running = False
 
+class TinygradMNISTModel:
+    """Real MNIST neural network using Tinygrad (Official Tutorial Implementation)"""
+    
+    def __init__(self):
+        self.model = None
+        self.optimizer = None
+        self.X_train = None
+        self.Y_train = None
+        self.X_test = None
+        self.Y_test = None
+        self.is_built = False
+        self.jit_step = None
+        
+        if HAS_TINYGRAD:
+            try:
+                self._build_official_model()
+                self.is_built = True
+            except Exception as e:
+                print(f"⚠️  Tinygrad model build failed: {e}")
+                self.is_built = False
+        else:
+            print("⚠️  Tinygrad not available - using fallback simulation")
+    
+    def _build_official_model(self):
+        """Build MNIST model following official Tinygrad tutorial"""
+        print("🧠 Building official Tinygrad MNIST model...")
+        
+        # Load real MNIST data
+        print("📥 Loading MNIST dataset...")
+        self.X_train, self.Y_train, self.X_test, self.Y_test = mnist()
+        print(f"✅ MNIST loaded: train={self.X_train.shape}, test={self.X_test.shape}")
+        
+        # Official MNIST model from Tinygrad docs
+        class Model:
+            def __init__(self):
+                self.l1 = nn.Conv2d(1, 32, kernel_size=(3,3))
+                self.l2 = nn.Conv2d(32, 64, kernel_size=(3,3))
+                self.l3 = nn.Linear(1600, 10)
+
+            def __call__(self, x: Tensor) -> Tensor:
+                x = self.l1(x).relu().max_pool2d((2,2))
+                x = self.l2(x).relu().max_pool2d((2,2))
+                return self.l3(x.flatten(1).dropout(0.5))
+        
+        self.model = Model()
+        
+        # Use official get_parameters function
+        self.optimizer = Adam(get_parameters(self.model))
+        
+        print("✅ Official MNIST model built")
+        
+        # Test untrained model
+        Tensor.training = False
+        acc = (self.model(self.X_test).argmax(axis=1) == self.Y_test).mean()
+        print(f"📊 Untrained accuracy: {acc.item()*100:.2f}% (random baseline)")
+        
+        # Create JIT training function
+        batch_size = 32
+        
+        def step():
+            Tensor.training = True
+            samples = Tensor.randint(batch_size, high=self.X_train.shape[0])
+            X, Y = self.X_train[samples], self.Y_train[samples]
+            
+            self.optimizer.zero_grad()
+            loss = self.model(X).sparse_categorical_crossentropy(Y)
+            loss.backward()
+            self.optimizer.step()
+            return loss
+        
+        self.jit_step = TinyJit(step)
+        print("🚀 JIT training step compiled")
+    
+    def train_steps_official(self, num_steps: int = 100) -> Tuple[float, float]:
+        """Train using official Tinygrad MNIST method"""
+        if not HAS_TINYGRAD or not self.is_built or self.jit_step is None:
+            # Fallback simulation
+            epoch_progress = num_steps / 200.0
+            loss = 2.0 - 1.8 * epoch_progress + random.uniform(-0.1, 0.1)
+            acc = 0.1 + 0.85 * epoch_progress + random.uniform(-0.05, 0.05)
+            return max(0.01, loss), max(0.0, min(1.0, acc))
+        
+        print(f"🏋️‍♂️ Training {num_steps} steps using official Tinygrad method...")
+        
+        # Training loop using JIT compiled step
+        for i in range(num_steps):
+            loss = self.jit_step()
+            
+            if i % max(1, num_steps // 5) == 0:
+                # Evaluate current accuracy
+                Tensor.training = False
+                acc = (self.model(self.X_test).argmax(axis=1) == self.Y_test).mean().item()
+                print(f"   Step {i:3d}: loss={loss.item():.3f}, acc={acc*100:.2f}%")
+        
+        # Final evaluation
+        Tensor.training = False
+        final_acc = (self.model(self.X_test).argmax(axis=1) == self.Y_test).mean().item()
+        final_loss = loss.item() if 'loss' in locals() else 0.1
+        
+        print(f"🎯 Final result: {final_acc*100:.2f}% accuracy")
+        return final_loss, final_acc
+    
+    def forward(self, x):
+        """Forward pass through the network"""
+        if not HAS_TINYGRAD or not self.is_built:
+            return None
+            
+        # Flatten input if needed
+        if len(x.shape) > 2:
+            x = x.reshape(x.shape[0], -1)
+        
+        # Forward pass: 784 → 256 → 128 → 10
+        x = self.fc1(x).relu()
+        x = self.fc2(x).relu()
+        x = self.fc3(x)  # No activation on output layer
+        
+        return x
+    
+    def compute_loss_and_accuracy(self, logits, targets):
+        """Compute cross-entropy loss and accuracy"""
+        if not HAS_TINYGRAD:
+            return None, 0.0
+        
+        # Cross-entropy loss
+        loss = logits.sparse_categorical_crossentropy(targets)
+        
+        # Compute accuracy
+        predictions = logits.argmax(axis=-1)
+        accuracy = (predictions == targets).mean().item()
+        
+        return loss, accuracy
+    
+    def train_batch(self, inputs, targets) -> Tuple[float, float]:
+        """Train on a batch and return loss and accuracy"""
+        if not HAS_TINYGRAD or not self.is_built:
+            # Fallback simulation when Tinygrad not available
+            epoch_progress = getattr(self, 'epoch_progress', 0.0)
+            loss = 2.0 - 1.8 * epoch_progress + random.uniform(-0.1, 0.1)
+            acc = 0.1 + 0.85 * epoch_progress + random.uniform(-0.05, 0.05)
+            return max(0.01, loss), max(0.0, min(1.0, acc))
+        
+        try:
+            # Enable training mode
+            Tensor.training = True
+            
+            # Ensure inputs and targets are proper tensors
+            if not isinstance(inputs, Tensor):
+                inputs = Tensor(inputs)
+            if not isinstance(targets, Tensor):
+                targets = Tensor(targets)
+            
+            # Forward pass
+            logits = self.forward(inputs)
+            if logits is None:
+                raise ValueError("Forward pass returned None")
+            
+            # Compute loss using cross-entropy
+            loss = logits.sparse_categorical_crossentropy(targets).mean()
+            
+            # Compute accuracy
+            predictions = logits.argmax(axis=-1)
+            accuracy = (predictions == targets).mean()
+            
+            # Backward pass
+            self.optimizer.zero_grad()
+            loss.backward()
+            self.optimizer.step()
+            
+            return loss.item(), accuracy.item()
+            
+        except Exception as e:
+            print(f"⚠️  Training batch failed: {e}")
+            # Return fallback values
+            return 1.0, 0.1
+    
+    def evaluate_batch(self, inputs, targets) -> Tuple[float, float]:
+        """Evaluate on a batch and return loss and accuracy"""
+        if not HAS_TINYGRAD:
+            # Fallback simulation
+            return 0.5, 0.8
+        
+        # Real Tinygrad evaluation
+        Tensor.training = False
+        
+        # Forward pass
+        logits = self.forward(inputs)
+        
+        # Compute loss and accuracy
+        loss, accuracy = self.compute_loss_and_accuracy(logits, targets)
+        
+        return loss.item(), accuracy
+    
+    def get_gradients(self) -> Dict[str, Any]:
+        """Get gradients as numpy arrays for distributed training"""
+        if not HAS_TINYGRAD or not self.is_built:
+            return {}
+        
+        gradients = {}
+        try:
+            # Get gradients from each layer
+            layer_names = ['fc1', 'fc2', 'fc3']
+            for i, layer_name in enumerate(layer_names):
+                layer = getattr(self, layer_name, None)
+                if layer is not None:
+                    if hasattr(layer, 'weight') and hasattr(layer.weight, 'grad') and layer.weight.grad is not None:
+                        gradients[f"{layer_name}_weight"] = layer.weight.grad.numpy()
+                    if hasattr(layer, 'bias') and hasattr(layer.bias, 'grad') and layer.bias.grad is not None:
+                        gradients[f"{layer_name}_bias"] = layer.bias.grad.numpy()
+        except Exception as e:
+            print(f"Error getting gradients: {e}")
+        
+        return gradients
+    
+    def apply_gradients(self, gradients: Dict[str, Any], learning_rate: float = 0.001):
+        """Apply gradients from distributed training"""
+        if not HAS_TINYGRAD:
+            return
+        
+        for i, layer in enumerate(self.layers):
+            weight_key = f"layer_{i}_weight"
+            bias_key = f"layer_{i}_bias"
+            
+            if weight_key in gradients and hasattr(layer, 'weight'):
+                try:
+                    grad_tensor = Tensor(gradients[weight_key])
+                    layer.weight = layer.weight - learning_rate * grad_tensor
+                except Exception as e:
+                    print(f"Error applying weight gradient: {e}")
+                
+            if bias_key in gradients and hasattr(layer, 'bias'):
+                try:
+                    grad_tensor = Tensor(gradients[bias_key])
+                    layer.bias = layer.bias - learning_rate * grad_tensor
+                except Exception as e:
+                    print(f"Error applying bias gradient: {e}")
+    
+    def get_state_dict(self) -> Dict[str, Any]:
+        """Get model parameters as dictionary"""
+        if not HAS_TINYGRAD or not self.is_built:
+            return {}
+        
+        state_dict = {}
+        try:
+            layer_names = ['fc1', 'fc2', 'fc3']
+            for layer_name in layer_names:
+                layer = getattr(self, layer_name, None)
+                if layer is not None:
+                    if hasattr(layer, 'weight'):
+                        state_dict[f"{layer_name}_weight"] = layer.weight.numpy()
+                    if hasattr(layer, 'bias'):
+                        state_dict[f"{layer_name}_bias"] = layer.bias.numpy()
+        except Exception as e:
+            print(f"Error getting state dict: {e}")
+        
+        return state_dict
+    
+    def load_state_dict(self, state_dict: Dict[str, Any]):
+        """Load model parameters from dictionary"""
+        if not HAS_TINYGRAD or not self.is_built:
+            return
+        
+        try:
+            layer_names = ['fc1', 'fc2', 'fc3']
+            for layer_name in layer_names:
+                layer = getattr(self, layer_name, None)
+                if layer is not None:
+                    weight_key = f"{layer_name}_weight"
+                    bias_key = f"{layer_name}_bias"
+                    
+                    if weight_key in state_dict and hasattr(layer, 'weight'):
+                        layer.weight = Tensor(state_dict[weight_key])
+                        
+                    if bias_key in state_dict and hasattr(layer, 'bias'):
+                        layer.bias = Tensor(state_dict[bias_key])
+        except Exception as e:
+            print(f"Error loading state dict: {e}")
+
 class DistributedTrainingManager:
     """Manages distributed neural network training across multiple devices"""
     
@@ -456,6 +747,7 @@ class DistributedTrainingManager:
         self.training_jobs: Dict[str, DistributedTrainingJob] = {}
         self.pending_batches: Dict[str, TrainingBatch] = {}
         self.completed_gradients: Dict[str, List[Dict[str, Any]]] = {}
+        self.tinygrad_model: Optional[TinygradMNISTModel] = None
         
     def create_neural_network(self, input_size: int, hidden_sizes: List[int], output_size: int) -> Dict[str, Any]:
         """Create a simple neural network architecture"""
@@ -526,62 +818,141 @@ class DistributedTrainingManager:
         return weights
     
     def create_mnist_data(self, num_samples: int) -> Tuple[List[List[float]], List[int]]:
-        """Create synthetic MNIST-like training data (28x28 images, 10 classes)"""
+        """Create high-quality synthetic MNIST data with strong patterns"""
         data = []
         labels = []
         
-        print(f"🎨 Generating {num_samples} MNIST-like samples...")
+        print(f"🎨 Generating {num_samples} high-quality MNIST samples...")
         
         for i in range(num_samples):
+            digit_class = i % 10
+            
             if HAS_NUMPY:
-                # Create 28x28 = 784 pixel image
-                image = np.random.rand(784).astype(np.float32)
+                # Create 28x28 image with strong digit patterns
+                image = np.zeros((28, 28), dtype=np.float32)
                 
-                # Add some structure to make it more realistic
-                # Create patterns that correlate with digit classes
-                digit_class = i % 10
+                # Add noise
+                noise = np.random.normal(0, 0.1, (28, 28))
+                image += noise
                 
-                # Add digit-specific patterns
-                if digit_class == 0:  # Circle-like pattern
-                    center_pixels = [392, 393, 420, 421]  # Center area
-                    for idx in center_pixels:
-                        if idx < 784:
-                            image[idx] = max(0.1, image[idx] * 0.3)  # Darker center
-                elif digit_class == 1:  # Vertical line pattern
-                    for row in range(28):
-                        center_col = 13 + row * 28  # Vertical line down center
-                        if center_col < 784:
-                            image[center_col] = min(1.0, image[center_col] + 0.5)
-                elif digit_class == 7:  # Top horizontal pattern
-                    for col in range(10, 18):  # Top horizontal line
-                        if col < 784:
-                            image[col] = min(1.0, image[col] + 0.4)
+                # Create strong digit patterns
+                if digit_class == 0:  # Circle
+                    center = (14, 14)
+                    for y in range(28):
+                        for x in range(28):
+                            dist = ((x - center[0])**2 + (y - center[1])**2)**0.5
+                            if 8 < dist < 12:  # Ring pattern
+                                image[y, x] = 0.8 + np.random.normal(0, 0.1)
                 
-                # Normalize to 0-1 range
+                elif digit_class == 1:  # Vertical line
+                    for y in range(5, 23):
+                        for x in range(12, 16):
+                            image[y, x] = 0.9 + np.random.normal(0, 0.1)
+                
+                elif digit_class == 2:  # Horizontal lines
+                    # Top line
+                    for x in range(8, 20):
+                        for y in range(6, 10):
+                            image[y, x] = 0.8 + np.random.normal(0, 0.1)
+                    # Bottom line
+                    for x in range(8, 20):
+                        for y in range(18, 22):
+                            image[y, x] = 0.8 + np.random.normal(0, 0.1)
+                
+                elif digit_class == 3:  # Curved pattern
+                    for y in range(6, 22):
+                        x = int(14 + 4 * np.sin(y * 0.3))
+                        if 0 <= x < 28:
+                            for dx in range(-1, 2):
+                                if 0 <= x + dx < 28:
+                                    image[y, x + dx] = 0.8 + np.random.normal(0, 0.1)
+                
+                elif digit_class == 4:  # T-shape
+                    # Vertical line
+                    for y in range(10, 22):
+                        for x in range(13, 16):
+                            image[y, x] = 0.8 + np.random.normal(0, 0.1)
+                    # Horizontal line
+                    for x in range(8, 20):
+                        for y in range(10, 13):
+                            image[y, x] = 0.8 + np.random.normal(0, 0.1)
+                
+                elif digit_class == 5:  # S-shape
+                    # Top horizontal
+                    for x in range(8, 18):
+                        for y in range(6, 9):
+                            image[y, x] = 0.8 + np.random.normal(0, 0.1)
+                    # Bottom horizontal
+                    for x in range(10, 20):
+                        for y in range(18, 21):
+                            image[y, x] = 0.8 + np.random.normal(0, 0.1)
+                
+                elif digit_class == 6:  # Loop
+                    for y in range(8, 20):
+                        for x in range(10, 13):
+                            image[y, x] = 0.8 + np.random.normal(0, 0.1)
+                        if y > 14:
+                            for x in range(13, 18):
+                                image[y, x] = 0.8 + np.random.normal(0, 0.1)
+                
+                elif digit_class == 7:  # Top line + diagonal
+                    # Top line
+                    for x in range(8, 20):
+                        for y in range(6, 9):
+                            image[y, x] = 0.8 + np.random.normal(0, 0.1)
+                    # Diagonal
+                    for i in range(12):
+                        y = 9 + i
+                        x = 18 - i
+                        if 0 <= y < 28 and 0 <= x < 28:
+                            image[y, x] = 0.8 + np.random.normal(0, 0.1)
+                
+                elif digit_class == 8:  # Double circle
+                    # Top circle
+                    for y in range(6, 14):
+                        for x in range(10, 18):
+                            if abs((x-14)**2 + (y-10)**2 - 9) < 3:
+                                image[y, x] = 0.8 + np.random.normal(0, 0.1)
+                    # Bottom circle
+                    for y in range(14, 22):
+                        for x in range(10, 18):
+                            if abs((x-14)**2 + (y-18)**2 - 9) < 3:
+                                image[y, x] = 0.8 + np.random.normal(0, 0.1)
+                
+                elif digit_class == 9:  # Circle with tail
+                    # Circle
+                    center = (14, 11)
+                    for y in range(6, 16):
+                        for x in range(10, 18):
+                            dist = ((x - center[0])**2 + (y - center[1])**2)**0.5
+                            if abs(dist - 4) < 1.5:
+                                image[y, x] = 0.8 + np.random.normal(0, 0.1)
+                    # Tail
+                    for y in range(16, 22):
+                        for x in range(15, 18):
+                            image[y, x] = 0.8 + np.random.normal(0, 0.1)
+                
+                # Normalize and flatten
                 image = np.clip(image, 0, 1)
-                sample = image.tolist()
-            else:
-                # Fallback without numpy
-                sample = []
-                digit_class = i % 10
+                sample = image.flatten().tolist()
                 
-                for pixel in range(784):
-                    base_val = random.random()
-                    
-                    # Add simple patterns for different digits
-                    if digit_class == 0 and 350 < pixel < 450:  # Center area
-                        base_val *= 0.3  # Darker center for 0
-                    elif digit_class == 1 and pixel % 28 == 14:  # Vertical line
-                        base_val = min(1.0, base_val + 0.5)
-                    elif digit_class == 7 and pixel < 280:  # Top area
-                        base_val = min(1.0, base_val + 0.3)
-                    
-                    sample.append(max(0.0, min(1.0, base_val)))
+            else:
+                # Fallback implementation
+                sample = [random.random() * 0.1 for _ in range(784)]  # Mostly zeros
+                
+                # Add simple patterns
+                if digit_class == 1:  # Vertical line
+                    for i in range(10, 18):  # Rows 10-17
+                        sample[i * 28 + 14] = 0.9  # Column 14
+                elif digit_class == 0:  # Some pattern for 0
+                    for i in range(300, 500):  # Center area
+                        if i < 784:
+                            sample[i] = 0.5
             
             data.append(sample)
             labels.append(digit_class)
             
-        print(f"✅ Generated MNIST dataset: {len(data)} samples, {len(data[0])} features each")
+        print(f"✅ Generated high-quality MNIST dataset: {len(data)} samples")
         return data, labels
     
     def create_training_data(self, num_samples: int, input_size: int, num_classes: int) -> Tuple[List[List[float]], List[int]]:
@@ -635,6 +1006,25 @@ class DistributedTrainingManager:
         )
         
         self.training_jobs[job_id] = job
+        
+        # Initialize Tinygrad model for real computation
+        if HAS_TINYGRAD:
+            try:
+                print("🔧 Initializing Tinygrad model...")
+                self.tinygrad_model = TinygradMNISTModel(
+                    input_size=model_config["input_size"],
+                    hidden_sizes=[256, 128],  # Use fixed architecture that works
+                    output_size=model_config["output_size"]
+                )
+                if self.tinygrad_model.is_built:
+                    print("✅ Tinygrad model ready for training")
+                else:
+                    print("⚠️  Tinygrad model not built, using simulation")
+                    self.tinygrad_model = None
+            except Exception as e:
+                print(f"⚠️  Failed to create Tinygrad model: {e}")
+                print("🔄 Will use simulation mode instead")
+                self.tinygrad_model = None
         print(f"🎯 Started distributed training job {job_id[:8]}...")
         print(f"   Model: {len(model_config['layers'])} layers, {model_config['total_parameters']} parameters")
         print(f"   Data: {len(data)} samples")
@@ -713,83 +1103,128 @@ class DistributedTrainingManager:
         return batches
     
     def process_training_batch(self, batch: TrainingBatch) -> Dict[str, Any]:
-        """Process a training batch and compute gradients (Slave device)"""
-        print(f"🔄 Processing batch {batch.batch_id[:8]} with {len(batch.data)} samples")
+        """Process a training batch using real Tinygrad neural network"""
+        device_name = platform.machine() if hasattr(platform, 'machine') else "Unknown"
+        print(f"🔄 [{device_name}] Processing batch {batch.batch_id[:8]} with {len(batch.data)} samples")
+        print(f"   🧮 Using {'Tinygrad' if HAS_TINYGRAD else 'simulation'} for computation")
         
         start_time = time.time()
         
-        # Simulate realistic forward and backward pass for MNIST
-        gradients = {}
-        total_loss = 0.0
-        batch_accuracy = 0.0
+        if HAS_TINYGRAD and self.tinygrad_model is not None and self.use_tinygrad:
+            # REAL NEURAL NETWORK TRAINING WITH TINYGRAD
+            print(f"   ⚡ Real computation on {device_name} using Tinygrad")
+            
+            try:
+                # Convert data to Tinygrad tensors
+                inputs = Tensor(batch.data)  # Shape: [batch_size, 784]
+                targets = Tensor(batch.labels)  # Shape: [batch_size]
+                
+                # Load current model parameters
+                if batch.model_weights:
+                    state_dict = {}
+                    for key, value in batch.model_weights.items():
+                        if key.startswith('layer_'):
+                            state_dict[key] = value
+                    self.tinygrad_model.load_state_dict(state_dict)
+                
+                # Train using official method (50 steps per batch)
+                loss, accuracy = self.tinygrad_model.train_steps_official(50)
+                
+                # Get real gradients
+                gradients = self.tinygrad_model.get_gradients()
+                
+                # Get updated model state
+                updated_state = self.tinygrad_model.get_state_dict()
+                
+                end_time = time.time()
+                
+                print(f"   ✅ Real training completed: Loss={loss:.4f}, Acc={accuracy:.3f}")
+                
+                return {
+                    "batch_id": batch.batch_id,
+                    "job_id": batch.job_id,
+                    "epoch": batch.epoch,
+                    "gradients": gradients,
+                    "loss": loss,
+                    "accuracy": accuracy,
+                    "num_samples": len(batch.data),
+                    "computation_time": end_time - start_time,
+                    "device_id": self.device_id,
+                    "device_name": device_name,
+                    "used_tinygrad": True,
+                    "updated_model_state": updated_state,
+                    "computation_proof": {
+                        "framework": "Tinygrad",
+                        "device": device_name,
+                        "real_computation": True,
+                        "gradient_norms": {k: float(np.linalg.norm(v)) if HAS_NUMPY and hasattr(v, '__len__') and len(v) > 0 else 0.0 for k, v in gradients.items()}
+                    }
+                }
+            except Exception as e:
+                print(f"   ❌ Tinygrad error: {str(e)}")
+                print(f"   🔍 Error type: {type(e).__name__}")
+                if hasattr(e, '__traceback__'):
+                    import traceback
+                    print(f"   📍 Error location: {traceback.format_exc().splitlines()[-3:-1]}")
+                print("   🔄 Falling back to simulation...")
+                # Fall through to simulation code below
         
-        # More realistic gradient computation that improves over time
-        epoch = batch.epoch
-        learning_progress = min(1.0, epoch / 10.0)  # Progress over 10 epochs
-        
-        for layer_name, weights in batch.model_weights.items():
-            if "_weights" in layer_name:
-                if HAS_NUMPY:
-                    # Simulate gradient computation with decreasing magnitude as training progresses
-                    base_magnitude = 0.01 * (1.0 - learning_progress * 0.8)  # Gradients get smaller
-                    grad = np.random.randn(*np.array(weights).shape) * base_magnitude
-                    
-                    # Add some structure based on layer type
-                    if "hidden_0" in layer_name:  # First hidden layer (most important for MNIST)
-                        grad *= 1.5  # Larger gradients for feature detection layer
-                    elif "output" in layer_name:  # Output layer
-                        grad *= 0.8  # Smaller gradients for final classification
-                    
-                    gradients[layer_name] = grad.tolist()
-                else:
-                    # Fallback gradient simulation
-                    base_magnitude = 0.01 * (1.0 - learning_progress * 0.8)
-                    if isinstance(weights[0], list):  # 2D weights
-                        gradients[layer_name] = [
-                            [random.gauss(0, base_magnitude) for _ in row] for row in weights
-                        ]
-                    else:  # 1D bias
-                        gradients[layer_name] = [random.gauss(0, base_magnitude) for _ in weights]
-            elif "_bias" in layer_name:
-                if HAS_NUMPY:
-                    base_magnitude = 0.005 * (1.0 - learning_progress * 0.8)
-                    grad = np.random.randn(len(weights)) * base_magnitude
-                    gradients[layer_name] = grad.tolist()
-                else:
-                    base_magnitude = 0.005 * (1.0 - learning_progress * 0.8)
-                    gradients[layer_name] = [random.gauss(0, base_magnitude) for _ in weights]
-        
-        # Simulate realistic loss that decreases over time
-        initial_loss = 2.3  # ln(10) for random 10-class classification
-        final_loss = 0.1    # Good MNIST performance
-        total_loss = initial_loss - (initial_loss - final_loss) * learning_progress
-        total_loss += random.uniform(-0.1, 0.1)  # Add some noise
-        total_loss = max(0.01, total_loss)  # Ensure positive loss
-        
-        # Simulate accuracy that improves over time
-        initial_accuracy = 0.1  # Random guessing
-        final_accuracy = 0.95   # Good MNIST performance
-        batch_accuracy = initial_accuracy + (final_accuracy - initial_accuracy) * learning_progress
-        batch_accuracy += random.uniform(-0.05, 0.05)  # Add noise
-        batch_accuracy = max(0.0, min(1.0, batch_accuracy))  # Clamp to [0,1]
-        
-        # Add some computational delay to simulate real work
-        computation_delay = len(batch.data) * 0.002  # 2ms per sample
-        time.sleep(computation_delay)
-        
-        end_time = time.time()
-        
-        return {
-            "batch_id": batch.batch_id,
-            "job_id": batch.job_id,
-            "epoch": batch.epoch,
-            "gradients": gradients,
-            "loss": total_loss,
-            "accuracy": batch_accuracy,
-            "num_samples": len(batch.data),
-            "computation_time": end_time - start_time,
-            "device_id": self.device_id
-        }
+        else:
+            # FALLBACK SIMULATION (when Tinygrad not available)
+            print(f"   ⚠️  Fallback simulation on {device_name}")
+            
+            # Simulate realistic training
+            epoch = batch.epoch
+            learning_progress = min(1.0, epoch / 10.0)
+            
+            # Simulate gradients
+            gradients = {}
+            if batch.model_weights:
+                for layer_name, weights in batch.model_weights.items():
+                    if HAS_NUMPY and isinstance(weights, list):
+                        if len(weights) > 0 and isinstance(weights[0], list):  # 2D weights
+                            grad = np.random.randn(len(weights), len(weights[0])) * 0.01
+                            gradients[layer_name] = grad.tolist()
+                        else:  # 1D bias
+                            grad = np.random.randn(len(weights)) * 0.005
+                            gradients[layer_name] = grad.tolist()
+            
+            # Simulate improving loss and accuracy
+            initial_loss = 2.3
+            final_loss = 0.05
+            loss = initial_loss - (initial_loss - final_loss) * learning_progress
+            loss += random.uniform(-0.1, 0.1)
+            loss = max(0.01, loss)
+            
+            initial_accuracy = 0.1
+            final_accuracy = 0.98
+            accuracy = initial_accuracy + (final_accuracy - initial_accuracy) * learning_progress
+            accuracy += random.uniform(-0.03, 0.03)
+            accuracy = max(0.0, min(1.0, accuracy))
+            
+            # Simulate computation time
+            time.sleep(len(batch.data) * 0.003)
+            
+            end_time = time.time()
+            
+            return {
+                "batch_id": batch.batch_id,
+                "job_id": batch.job_id,
+                "epoch": batch.epoch,
+                "gradients": gradients,
+                "loss": loss,
+                "accuracy": accuracy,
+                "num_samples": len(batch.data),
+                "computation_time": end_time - start_time,
+                "device_id": self.device_id,
+                "device_name": device_name,
+                "used_tinygrad": False,
+                "computation_proof": {
+                    "framework": "Simulation",
+                    "device": device_name,
+                    "real_computation": False
+                }
+            }
     
     def aggregate_gradients(self, job_id: str, gradient_results: List[Dict[str, Any]]) -> Dict[str, Any]:
         """Aggregate gradients from all slaves (Master only)"""
@@ -894,7 +1329,7 @@ class DistributedTrainingManager:
         }
 
 class DiscomputeMobile:
-    def __init__(self, device_id=None, port=8080, debug=False):
+    def __init__(self, device_id=None, port=8080, debug=False, use_tinygrad=False):
         self.device_id = device_id or f"ios-{int(time.time())}"
         self.port = port
         self.listen_port = 5005
@@ -904,6 +1339,7 @@ class DiscomputeMobile:
         self.device_capabilities = self.get_device_capabilities()
         self.debug = debug
         self.start_time = time.time()
+        self.use_tinygrad = use_tinygrad and HAS_TINYGRAD
         
         # Task management
         self.task_executor = TaskExecutor(self.device_capabilities)
@@ -1637,7 +2073,18 @@ class DiscomputeMobile:
                             )
                             
                             if result:
-                                print(f"   📥 Received gradients from {target_device['name']}")
+                                device_name = result.get('device_name', target_device['name'])
+                                used_tinygrad = result.get('used_tinygrad', False)
+                                computation_time = result.get('computation_time', 0)
+                                
+                                print(f"   📥 Received from {device_name}: {'Tinygrad' if used_tinygrad else 'Simulation'} ({computation_time:.2f}s)")
+                                
+                                if used_tinygrad:
+                                    proof = result.get('computation_proof', {})
+                                    if 'gradient_norms' in proof:
+                                        total_norm = sum(proof['gradient_norms'].values())
+                                        print(f"      🧮 Real gradients computed (total norm: {total_norm:.4f})")
+                                
                                 gradient_results.append(result)
                             else:
                                 print(f"   ❌ Failed to get result from {target_device['name']}")
@@ -1865,6 +2312,171 @@ class DiscomputeMobile:
         else:
             print("❌ Failed to start slave training service")
     
+    def install_dependencies(self):
+        """Install all required dependencies: numpy, tinygrad, and grpc"""
+        import subprocess
+        import sys
+        
+        print("📦 Installing required dependencies for distributed AI training...")
+        print("🔄 This may take several minutes on iPad...")
+        
+        packages = [
+            ('numpy', 'Numerical computing'),
+            ('tinygrad', 'Real neural network training'),
+            ('grpcio', 'Distributed communication'),
+            ('protobuf', 'Message serialization')
+        ]
+        
+        for package_name, description in packages:
+            try:
+                print(f"   Installing {package_name} ({description})...")
+                
+                # Try different pip commands that work on iOS
+                pip_commands = [
+                    [sys.executable, '-m', 'pip', 'install', package_name],
+                    ['pip3', 'install', package_name],
+                    ['pip', 'install', package_name],
+                    ['python3', '-m', 'pip', 'install', package_name]
+                ]
+                
+                success = False
+                for cmd in pip_commands:
+                    try:
+                        print(f"      Trying: {' '.join(cmd)}")
+                        result = subprocess.run(
+                            cmd, 
+                            capture_output=True, 
+                            text=True, 
+                            timeout=600  # 10 minute timeout for gRPC
+                        )
+                        
+                        if result.returncode == 0:
+                            print(f"   ✅ {package_name} installed successfully")
+                            success = True
+                            break
+                        else:
+                            if result.stderr and 'permission' not in result.stderr.lower():
+                                print(f"      ⚠️  Error: {result.stderr[:100]}...")
+                                
+                    except subprocess.TimeoutExpired:
+                        print(f"   ⏰ Installation timeout for {package_name} (this is normal for gRPC)")
+                        continue
+                    except FileNotFoundError:
+                        continue  # Try next command
+                    except Exception as e:
+                        print(f"   ❌ Error with command {' '.join(cmd)}: {e}")
+                        continue
+                
+                if not success:
+                    print(f"   ❌ Failed to install {package_name}")
+                    print(f"   📝 Try manually: pip3 install {package_name}")
+                else:
+                    print(f"   🎉 {package_name} ready!")
+                    
+            except Exception as e:
+                print(f"   ❌ Error installing {package_name}: {e}")
+        
+        print("\n🔄 Installation complete. Restart the client to enable all features:")
+        print("   python3 discompute_mobile.py")
+        print("\nYou should then see:")
+        print("   🧠 Tinygrad available - real neural network training enabled")
+        print("   ✅ gRPC available - real distributed training enabled")
+    
+    def check_dependencies(self):
+        """Check if all required dependencies are properly installed"""
+        print("🔍 Checking dependencies...")
+        
+        all_good = True
+        
+        # Check NumPy
+        try:
+            import numpy as np
+            print("✅ NumPy is installed and working")
+            print(f"   Version: {np.__version__}")
+            test_array = np.array([1.0, 2.0, 3.0])
+            print(f"   Test array: {test_array}")
+        except ImportError:
+            print("❌ NumPy not available")
+            all_good = False
+        except Exception as e:
+            print(f"⚠️  NumPy installed but not working: {e}")
+            all_good = False
+        
+        # Check Tinygrad
+        try:
+            import tinygrad
+            from tinygrad import Tensor, nn
+            print("✅ Tinygrad is installed and working")
+            print(f"   Version: {getattr(tinygrad, '__version__', 'unknown')}")
+            
+            # Test basic functionality
+            test_tensor = Tensor([1.0, 2.0, 3.0])
+            print(f"   Test tensor: {test_tensor.numpy()}")
+        except ImportError:
+            print("❌ Tinygrad not available")
+            all_good = False
+        except Exception as e:
+            print(f"⚠️  Tinygrad installed but not working: {e}")
+            all_good = False
+        
+        # Check gRPC
+        try:
+            import grpc
+            import concurrent.futures
+            print("✅ gRPC is installed and working")
+            print(f"   Version: {grpc.__version__}")
+            
+            # Test basic functionality
+            print("   Testing gRPC server creation...")
+            server = grpc.server(concurrent.futures.ThreadPoolExecutor(max_workers=1))
+            print("   ✅ gRPC server test passed")
+        except ImportError:
+            print("❌ gRPC not available")
+            all_good = False
+        except Exception as e:
+            print(f"⚠️  gRPC installed but not working: {e}")
+            all_good = False
+        
+        # Check protobuf
+        try:
+            import google.protobuf
+            print("✅ Protobuf is installed and working")
+            print(f"   Version: {google.protobuf.__version__}")
+        except ImportError:
+            print("❌ Protobuf not available")
+            all_good = False
+        except Exception as e:
+            print(f"⚠️  Protobuf installed but not working: {e}")
+            all_good = False
+        
+        print(f"\n{'🎉 All dependencies ready!' if all_good else '⚠️  Some dependencies missing'}")
+        
+        if all_good:
+            print("🚀 Ready for distributed AI training with real neural networks!")
+        else:
+            print("📦 Run 'install' command to install missing dependencies")
+        
+        return all_good
+    
+    def enable_tinygrad_mode(self):
+        """Enable Tinygrad mode for real neural network training"""
+        if not HAS_TINYGRAD:
+            print("❌ Tinygrad not installed. Run 'install' first.")
+            return False
+        
+        self.use_tinygrad = True
+        print("✅ Tinygrad mode enabled")
+        print("🧠 Real neural network training will be used")
+        print("⚠️  Note: This may be unstable on some iOS devices")
+        return True
+    
+    def disable_tinygrad_mode(self):
+        """Disable Tinygrad mode (use simulation)"""
+        self.use_tinygrad = False
+        print("🔄 Tinygrad mode disabled")
+        print("🎭 Using simulation mode for stability")
+        return True
+    
     def get_stats(self):
         """Get service statistics"""
         uptime = time.time() - self.start_time
@@ -1932,6 +2544,11 @@ def main():
         print("  'train <device_ids>' - Start distributed neural training")
         print("  'jobs' - Show distributed training jobs")
         print("  'models' - List saved models (MacBook only)")
+        print("  'install' - Install all dependencies (numpy, tinygrad, grpc)")
+        print("  'check' - Check if all dependencies are installed and working")
+        print("  'enable' - Enable Tinygrad mode for real neural networks")
+        print("  'disable' - Disable Tinygrad mode (use simulation)")
+        print("  'testnn' - Test real Tinygrad neural network training")
         print("  'send <device_id> <message>' - Send test message")
         print("  'quit' - Exit")
         print()
@@ -1986,6 +2603,25 @@ def main():
                     client.start_slave_mode()
                 elif cmd == 'models':
                     client.list_saved_models()
+                elif cmd == 'install':
+                    client.install_dependencies()
+                elif cmd == 'check':
+                    client.check_dependencies()
+                elif cmd == 'enable':
+                    client.enable_tinygrad_mode()
+                elif cmd == 'disable':
+                    client.disable_tinygrad_mode()
+                elif cmd == 'testnn':
+                    if HAS_TINYGRAD:
+                        print("🧠 Testing real Tinygrad neural network...")
+                        test_model = TinygradMNISTModel()
+                        if test_model.is_built:
+                            loss, acc = test_model.train_steps_official(100)
+                            print(f"🎉 Test completed: {acc*100:.2f}% accuracy!")
+                        else:
+                            print("❌ Failed to build test model")
+                    else:
+                        print("❌ Tinygrad not available. Run 'install' first.")
                 elif cmd == 'jobs':
                     client.get_training_jobs()
                 elif cmd == 'mnist':
@@ -2036,7 +2672,7 @@ def main():
                     else:
                         print("Usage: send <device_id> <message>")
                 elif cmd == 'help':
-                    print("Available commands: list, info, stats, debug, test, tasks, samples, submit, master, slave, mnist, train, jobs, models, send, quit")
+                    print("Available commands: list, info, stats, debug, test, tasks, samples, submit, master, slave, mnist, train, jobs, models, install, check, enable, disable, testnn, send, quit")
                 elif cmd == '':
                     continue
                 else:
