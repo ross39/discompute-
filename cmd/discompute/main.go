@@ -231,8 +231,8 @@ func runTraining(ctx context.Context, logger *logrus.Logger) error {
 	trainer := training.NewDistributedTrainer(registry, logger)
 
 	// Wait for devices to be discovered
-	logger.Info("Waiting for iOS devices to join the training cluster...")
-	logger.Info("Make sure your iOS devices are running the enhanced client!")
+	logger.Info("Waiting for Mac devices to join the training cluster...")
+	logger.Info("Make sure your Mac devices are running the worker client!")
 
 	waitTime := 30 * time.Second
 	timer := time.NewTimer(waitTime)
@@ -246,22 +246,22 @@ func runTraining(ctx context.Context, logger *logrus.Logger) error {
 	}
 
 	// Check if we have enough devices
-	iosDevices := 0
+	macDevices := 0
 	for _, device := range discoveredDevices {
-		if device.Type == "iphone" || device.Type == "ipad" || device.Type == "ios" {
-			iosDevices++
+		if device.Type == "mac" || device.Type == "macbook" || device.Type == "imac" || device.Type == "mac_mini" || device.Type == "mac_studio" {
+			macDevices++
 		}
 	}
 
-	if iosDevices == 0 {
-		logger.Warn("No iOS devices discovered. Make sure:")
-		logger.Warn("  1. iOS devices are running discompute_ios_enhanced.py")
+	if macDevices == 0 {
+		logger.Warn("No Mac devices discovered. Make sure:")
+		logger.Warn("  1. Mac devices are running discompute_mac_worker.py")
 		logger.Warn("  2. All devices are on the same network")
 		logger.Warn("  3. UDP port 5005 is not blocked")
-		return fmt.Errorf("no iOS devices available for training")
+		return fmt.Errorf("no Mac devices available for training")
 	}
 
-	logger.WithField("ios_devices", iosDevices).Info("Found iOS devices, starting training...")
+	logger.WithField("mac_devices", macDevices).Info("Found Mac devices, starting training...")
 
 	// Create training configuration
 	config := training.TrainingConfig{

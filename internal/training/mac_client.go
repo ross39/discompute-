@@ -33,12 +33,12 @@ func NewMacDeviceClient(device *pb.Device, logger *logrus.Logger) *MacDeviceClie
 	}
 }
 
-// InitializeTraining initializes training on the iOS device
-func (c *IOSDeviceClient) InitializeTraining(ctx context.Context, config *TrainingConfig) error {
+// InitializeTraining initializes training on the Mac device
+func (c *MacDeviceClient) InitializeTraining(ctx context.Context, config *TrainingConfig) error {
 	c.logger.WithFields(logrus.Fields{
 		"device_id":  c.device.Id,
 		"model_type": config.ModelType,
-	}).Info("Initializing training on iOS device")
+	}).Info("Initializing training on Mac device")
 
 	payload := map[string]interface{}{
 		"action": "initialize_training",
@@ -57,13 +57,13 @@ func (c *IOSDeviceClient) InitializeTraining(ctx context.Context, config *Traini
 	return nil
 }
 
-// SendTrainingBatch sends a training batch to the iOS device
-func (c *IOSDeviceClient) SendTrainingBatch(ctx context.Context, batch *TrainingBatch) (*TrainingResult, error) {
+// SendTrainingBatch sends a training batch to the Mac device
+func (c *MacDeviceClient) SendTrainingBatch(ctx context.Context, batch *TrainingBatch) (*TrainingResult, error) {
 	c.logger.WithFields(logrus.Fields{
 		"device_id": c.device.Id,
 		"batch_id":  batch.BatchID,
 		"epoch":     batch.Epoch,
-	}).Debug("Sending training batch to iOS device")
+	}).Debug("Sending training batch to Mac device")
 
 	payload := map[string]interface{}{
 		"action": "train_batch",
@@ -119,13 +119,13 @@ func (c *IOSDeviceClient) SendTrainingBatch(ctx context.Context, batch *Training
 	return result, nil
 }
 
-// SendModelUpdate sends a model update to the iOS device
-func (c *IOSDeviceClient) SendModelUpdate(ctx context.Context, update *ModelUpdate) error {
+// SendModelUpdate sends a model update to the Mac device
+func (c *MacDeviceClient) SendModelUpdate(ctx context.Context, update *ModelUpdate) error {
 	c.logger.WithFields(logrus.Fields{
 		"device_id": c.device.Id,
 		"update_id": update.UpdateID,
 		"epoch":     update.Epoch,
-	}).Debug("Sending model update to iOS device")
+	}).Debug("Sending model update to Mac device")
 
 	payload := map[string]interface{}{
 		"action": "model_update",
@@ -145,7 +145,7 @@ func (c *IOSDeviceClient) SendModelUpdate(ctx context.Context, update *ModelUpda
 }
 
 // GetDeviceMetrics retrieves current device metrics
-func (c *IOSDeviceClient) GetDeviceMetrics(ctx context.Context) (*DeviceMetrics, error) {
+func (c *MacDeviceClient) GetDeviceMetrics(ctx context.Context) (*DeviceMetrics, error) {
 	payload := map[string]interface{}{
 		"action": "get_metrics",
 	}
@@ -175,9 +175,9 @@ func (c *IOSDeviceClient) GetDeviceMetrics(ctx context.Context) (*DeviceMetrics,
 	return metrics, nil
 }
 
-// Shutdown gracefully shuts down training on the iOS device
-func (c *IOSDeviceClient) Shutdown(ctx context.Context) error {
-	c.logger.WithField("device_id", c.device.Id).Info("Shutting down training on iOS device")
+// Shutdown gracefully shuts down training on the Mac device
+func (c *MacDeviceClient) Shutdown(ctx context.Context) error {
+	c.logger.WithField("device_id", c.device.Id).Info("Shutting down training on Mac device")
 
 	payload := map[string]interface{}{
 		"action": "shutdown_training",
@@ -195,8 +195,8 @@ func (c *IOSDeviceClient) Shutdown(ctx context.Context) error {
 	return nil
 }
 
-// sendRequest sends an HTTP request to the iOS device
-func (c *IOSDeviceClient) sendRequest(ctx context.Context, endpoint string, payload map[string]interface{}) (map[string]interface{}, error) {
+// sendRequest sends an HTTP request to the Mac device
+func (c *MacDeviceClient) sendRequest(ctx context.Context, endpoint string, payload map[string]interface{}) (map[string]interface{}, error) {
 	jsonData, err := json.Marshal(payload)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal payload: %w", err)
@@ -233,8 +233,8 @@ func (c *IOSDeviceClient) sendRequest(ctx context.Context, endpoint string, payl
 	return response, nil
 }
 
-// HealthCheck performs a health check on the iOS device
-func (c *IOSDeviceClient) HealthCheck(ctx context.Context) error {
+// HealthCheck performs a health check on the Mac device
+func (c *MacDeviceClient) HealthCheck(ctx context.Context) error {
 	payload := map[string]interface{}{
 		"action": "health_check",
 	}

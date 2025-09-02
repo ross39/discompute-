@@ -154,24 +154,23 @@ func (dt *DistributedTrainer) StartTrainingJob(ctx context.Context, config Train
 	return job, nil
 }
 
-// selectDevicesForTraining selects the best available iOS devices for training
+// selectDevicesForTraining selects the best available Mac devices for training
 func (dt *DistributedTrainer) selectDevicesForTraining(maxDevices int) []string {
 	allDevices := dt.registry.GetAllDevices()
-	var iosDevices []*pb.Device
+	var macDevices []*pb.Device
 
-	// Filter for available iOS devices
+	// Filter for available Mac devices
 	for _, device := range allDevices {
-		if (device.Type == "iphone" || device.Type == "ipad") &&
-			device.Status == pb.DeviceStatus_AVAILABLE &&
-			device.Capabilities.BatteryLevel > 0.2 { // At least 20% battery
-			iosDevices = append(iosDevices, device)
+		if (device.Type == "mac" || device.Type == "macbook" || device.Type == "imac" || device.Type == "mac_mini" || device.Type == "mac_studio") &&
+			device.Status == pb.DeviceStatus_AVAILABLE {
+			macDevices = append(macDevices, device)
 		}
 	}
 
-	// Sort by performance (simplified scoring)
-	// In practice, you'd want a more sophisticated scoring algorithm
-	deviceIDs := make([]string, 0, len(iosDevices))
-	for i, device := range iosDevices {
+	// Sort by performance (Apple Silicon > Intel, more memory = better)
+	// Priority: M3 > M2 > M1 > Intel, then by memory
+	deviceIDs := make([]string, 0, len(macDevices))
+	for i, device := range macDevices {
 		if i >= maxDevices {
 			break
 		}
@@ -244,7 +243,7 @@ func (dt *DistributedTrainer) initializeDevicesForTraining(ctx context.Context, 
 				return fmt.Errorf("device %s not found in registry", deviceID)
 			}
 
-			client = NewIOSDeviceClient(device, dt.logger)
+			client = NewMacDeviceClient(device, dt.logger)
 			dt.deviceClients[deviceID] = client
 		}
 

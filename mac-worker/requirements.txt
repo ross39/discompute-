@@ -1,0 +1,51 @@
+# Discompute Mac Worker Requirements
+# Optimized for Apple Silicon Macs
+
+# Core system monitoring
+psutil>=5.8.0
+
+# ML Frameworks (in priority order)
+# 1. MLX - Apple's native ML framework (fastest on Apple Silicon)
+mlx>=0.0.1
+
+# 2. Tinygrad - Cross-platform ML framework with Metal support
+tinygrad>=0.8.0
+
+# 3. PyTorch - Fallback with MPS (Metal Performance Shaders) support
+torch>=2.0.0
+torchvision>=0.15.0
+
+# Numeric computing
+numpy>=1.21.0
+
+# Optional: Enhanced Apple Silicon features
+# objc - For macOS system integration (install with: pip install pyobjc-framework-Cocoa)
+# pyobjc-framework-Cocoa>=9.0
+
+# Development and testing
+pytest>=6.0.0
+requests>=2.25.0
+
+# Installation Notes:
+# 
+# For Apple Silicon Macs (M1/M2/M3):
+# 1. MLX (recommended for best performance):
+#    pip install mlx
+# 
+# 2. Tinygrad with Metal support:
+#    pip install tinygrad
+# 
+# 3. PyTorch with MPS support:
+#    pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+# 
+# For Intel Macs:
+# 1. Use Tinygrad or PyTorch CPU versions
+# 2. MLX is not supported on Intel Macs
+# 
+# Quick install for Apple Silicon:
+# pip install mlx tinygrad torch torchvision psutil numpy
+# 
+# Verify installation:
+# python -c "import mlx.core as mx; print('MLX available')"
+# python -c "import tinygrad; print('Tinygrad available')"
+# python -c "import torch; print(f'PyTorch MPS: {torch.backends.mps.is_available()}')"
